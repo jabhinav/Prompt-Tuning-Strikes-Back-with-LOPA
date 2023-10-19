@@ -36,9 +36,9 @@ MODEL_CLASSES = {
 	'codegen2-7B': (AutoConfig, AutoModelForCausalLM),
 	'codegen2-16B': (AutoConfig, AutoModelForCausalLM),
 	'codegen25-7b-multi': (AutoConfig, AutoModelForCausalLM),  # Latest CodeGen2.5 7B model (Aug 2023)
-	'codellama/CodeLlama-7b-Python-hf': (AutoConfig, AutoModelForCausalLM),
-	'codellama/CodeLlama-13b-Python-hf': (AutoConfig, AutoModelForCausalLM),
-	'codellama/CodeLlama-34b-Python-hf': (AutoConfig, AutoModelForCausalLM),
+	'CodeLlama-7b-Python-hf': (AutoConfig, AutoModelForCausalLM),
+	'CodeLlama-13b-Python-hf': (AutoConfig, AutoModelForCausalLM),
+	'CodeLlama-34b-Python-hf': (AutoConfig, AutoModelForCausalLM),
 }
 
 TOKENIZER_CLASSES = {
@@ -163,6 +163,12 @@ def get_huggingface_path(model: str) -> str:
 		huggingface_path = 'Salesforce/codegen2-16B'
 	elif model == 'codegen25-7b-multi':
 		huggingface_path = 'Salesforce/codegen25-7b-multi'
+	elif model == 'CodeLlama-7b-Python-hf':
+		huggingface_path = 'codellama/CodeLlama-7b-Python-hf'
+	elif model == 'CodeLlama-13b-Python-hf':
+		huggingface_path = 'codellama/CodeLlama-13b-Python-hf'
+	elif model == 'CodeLlama-34b-Python-hf':
+		huggingface_path = 'codellama/CodeLlama-34b-Python-hf'
 	else:
 		raise NotImplementedError()
 	

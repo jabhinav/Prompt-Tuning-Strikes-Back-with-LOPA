@@ -300,7 +300,10 @@ class PeftMultiModel(PushToHubMixin, torch.nn.Module):
 				self.word_embeddings = transformer_backbone.get_submodule(named_param.replace(".weight", ""))
 				break
 		
+		# ##################################################################################################### #
 		# ################################################ My custom  ######################################### #
+		# ##################################################################################################### #
+		
 		# Create the prompt encoder and prompt tokens for 'K' libraries
 		for k in range(config.num_init_clusters):
 			if config.peft_type == PeftType.PROMPT_TUNING:
@@ -320,6 +323,7 @@ class PeftMultiModel(PushToHubMixin, torch.nn.Module):
 			self.prompt_tokens['{}_{}'.format(adapter_name, k)] = torch.arange(
 				config.num_virtual_tokens * config.num_transformer_submodules
 			).long()
+	
 	
 	def _prepare_model_for_gradient_checkpointing(self, model: PreTrainedModel):
 		r"""
@@ -345,8 +349,9 @@ class PeftMultiModel(PushToHubMixin, torch.nn.Module):
 		Returns the prompt embedding to save when saving the model. Only applicable when `peft_config.peft_type !=
 		PeftType.LORA`.
 		"""
-		
+		# ##################################################################################################### #
 		# ################################################ My custom  ######################################### #
+		# ##################################################################################################### #
 		library_prompt_embeddings = {}
 		config = self.peft_config[adapter_name]
 		
@@ -374,7 +379,11 @@ class PeftMultiModel(PushToHubMixin, torch.nn.Module):
 		Added functionality: Returns the virtual prompts for specific library
 		"""
 		peft_config = self.active_peft_config
+		
+		# ##################################################################################################### #
 		# ################################################ My custom  ######################################### #
+		# ##################################################################################################### #
+		
 		prompt_encoder = self.prompt_encoder[f'{self.active_adapter}_{library_idx}']
 		prompt_tokens = (
 			self.prompt_tokens[f'{self.active_adapter}_{library_idx}']
@@ -721,7 +730,10 @@ class PeftMultiModelForCausalLM(PeftMultiModel):
 	
 	def __init__(self, model, peft_config: PeftConfig, adapter_name="default"):
 		super().__init__(model, peft_config, adapter_name)
+		# # Store the base model's prepare_inputs_for_generation method (use to revert when there is an error)
 		self.base_model_prepare_inputs_for_generation = self.base_model.prepare_inputs_for_generation
+		# Initialize the library_idx
+		self.library_idx = None
 	
 	def forward(
 			self,
@@ -732,9 +744,15 @@ class PeftMultiModelForCausalLM(PeftMultiModel):
 			output_attentions=None,
 			output_hidden_states=None,
 			return_dict=None,
-			library_idx: int = 0,
 			**kwargs,
 	):
+		
+		# Get the library idx
+		library_idx = self.library_idx
+		# library_idx = kwargs.get("library_idx", None)
+		if library_idx is None:
+			raise ValueError("library_idx is not provided in generate")
+		
 		peft_config = self.active_peft_config
 		if not peft_config.is_prompt_learning:
 			if self.base_model.config.model_type == "mpt":
@@ -800,9 +818,10 @@ class PeftMultiModelForCausalLM(PeftMultiModel):
 			inputs_embeds = torch.cat((prompts, inputs_embeds), dim=1)
 			return self.base_model(inputs_embeds=inputs_embeds, **kwargs)
 	
-	def generate(self, library_idx: int = 0, **kwargs):
-		# ################################################ My custom  ######################################### #
-		self.base_model.prepare_inputs_for_generation = self.prepare_inputs_for_generation(library_idx, **kwargs)
+	def generate(self, **kwargs):
+		# # This will override base transformer's prepare_inputs_for_generation() method
+		# # and PEFT's prepare_inputs_for_generation() will be called instead but we have saved the base model's
+		self.base_model.prepare_inputs_for_generation = self.prepare_inputs_for_generation
 		if hasattr(self.base_model, "model"):
 			self.base_model.model.generation_config = self.generation_config
 		else:
@@ -816,9 +835,15 @@ class PeftMultiModelForCausalLM(PeftMultiModel):
 			self.base_model.prepare_inputs_for_generation = self.base_model_prepare_inputs_for_generation
 			return outputs
 	
+	# ##################################################################################################### #
+	# ################################################ My custom  ######################################### #
+	# ##################################################################################################### #
 	def prepare_inputs_for_generation(self, *args, **kwargs):
 		peft_config = self.active_peft_config
+		
+		# # First, get the base model's inputs -> Its prepare inputs for generation method is stored here
 		model_kwargs = self.base_model_prepare_inputs_for_generation(*args, **kwargs)
+		
 		if peft_config.is_prompt_learning:
 			if model_kwargs.get("attention_mask", None) is not None:
 				prefix_attention_mask = torch.ones(
@@ -838,22 +863,23 @@ class PeftMultiModelForCausalLM(PeftMultiModel):
 				)
 				kwargs["token_type_ids"] = None
 			
-			# ################################################ My custom  ######################################### #
 			# Get the library idx
-			try:
-				library_idx = kwargs.get('library_idx', None)
-			except:
-				raise ValueError("library_idx is not provided in generate")
+			library_idx = self.library_idx
+			# library_idx = kwargs.get("library_idx", None)
 			if library_idx is None:
 				raise ValueError("library_idx is not provided in generate")
 			
 			if model_kwargs["past_key_values"] is None and peft_config.peft_type == PeftType.PREFIX_TUNING:
-				past_key_values = self.get_prompt(batch_size=model_kwargs["input_ids"].shape[0], library_idx=library_idx)
+				past_key_values = self.get_prompt(
+					batch_size=model_kwargs["input_ids"].shape[0], library_idx=library_idx
+				)
 				model_kwargs["past_key_values"] = past_key_values
 			else:
 				if model_kwargs["past_key_values"] is None:
 					inputs_embeds = self.word_embeddings(model_kwargs["input_ids"])
-					prompts = self.get_prompt(batch_size=model_kwargs["input_ids"].shape[0], library_idx=library_idx)
+					prompts = self.get_prompt(
+						batch_size=model_kwargs["input_ids"].shape[0], library_idx=library_idx
+					)
 					prompts = prompts.to(inputs_embeds.dtype)
 					model_kwargs["inputs_embeds"] = torch.cat((prompts, inputs_embeds), dim=1)
 					model_kwargs["input_ids"] = None

@@ -200,7 +200,9 @@ def load_peft_weights(model_id: str, device: Optional[str] = None, **hf_hub_down
     return adapters_weights
 
 
-# ########################################## My Custom ########################################## #
+# ##################################################################################################### #
+# ################################################ My Custom ########################################## #
+# ##################################################################################################### #
 def get_peft_lib_model_state_dict(model, state_dict=None, adapter_name="default"):
     """
     Get the state dict of the Peft model.
@@ -254,6 +256,7 @@ def get_peft_lib_model_state_dict(model, state_dict=None, adapter_name="default"
         to_return = {k: state_dict[k] for k in state_dict if "ia3_" in k}
     else:
         raise NotImplementedError
+    
     if getattr(model, "modules_to_save", None) is not None:
         for key, value in state_dict.items():
             if any(f"{module_name}.modules_to_save.{adapter_name}" in key for module_name in model.modules_to_save):
@@ -263,6 +266,9 @@ def get_peft_lib_model_state_dict(model, state_dict=None, adapter_name="default"
     return to_return
 
 
+# ##################################################################################################### #
+# ################################################ My Custom ########################################## #
+# ##################################################################################################### #
 def set_peft_lib_model_state_dict(model, peft_model_state_dict, adapter_name="default"):
     """
     Set the state dict of the Peft model.
@@ -308,6 +314,7 @@ def set_peft_lib_model_state_dict(model, peft_model_state_dict, adapter_name="de
         raise NotImplementedError
 
     load_result = model.load_state_dict(peft_model_state_dict, strict=False)
+    
     if config.is_prompt_learning:
         
         for k in range(config.num_init_clusters):

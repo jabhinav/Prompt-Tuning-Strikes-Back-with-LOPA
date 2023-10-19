@@ -15,7 +15,7 @@ from transformers.modeling_utils import unwrap_model
 
 import logging
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType
-from utils.data import LibrarySampleDataset
+from utils.data import LibrarySampleDataset, APPSBaseDataset
 from utils.model import load_tokenizer, load_base_model, get_huggingface_path
 
 current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -108,6 +108,9 @@ def compute_responsibilities(args, batch, tokenizer, model) -> torch.Tensor:
 
 
 def learn(args):
+    # Initialise wandb
+    if args.wandb_logging:
+        wandb.init(project=args.project_name, config=vars(args))
     
     # Get the tokenizer
     tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
@@ -165,27 +168,29 @@ def learn(args):
     # ######################################### Initialisation for EM ############################################## #
     # Initialise the model parameters i.e. latent prompt embeddings for each library
     # This is equivalent to latching each library to a random sample from the dataset
-    rdm_idxs = torch.randint(0, len(dataset), (args.num_libraries,))
-    for k in range(args.num_libraries):
-        
-        logger.info("Initialisation for Library %d", k)
-        for i in tqdm(range(args.pre_num_iters), desc=f"Init. Iterations Lib {k}", position=0, leave=True):
-            batch = dataset.sample(rdm_idxs[k])
-            batch = tuple(t.unsqueeze(0).to(args.device) for t in batch)
-            
-            # Get the response log-probability of the sample coming from the latent prompt of library k
-            resp_log_prob = get_response_log_probs(args, batch, tokenizer, model, k)
-            
-            loss = -resp_log_prob.sum()  # responsibility = 1 for the sample coming from the latent prompt of library k
-            
-            # Update the model parameters
-            loss.backward()
-            optimizer.step()
-            lr_scheduler.step()  # Make sure this is constant schedule with no warmup
-            optimizer.zero_grad()
-            
-            logger.info(f"Iter {i} Loss: {loss.detach().cpu().numpy().item()}")
+    if args.pre_num_iters > 0:
+        rdm_idxs = torch.randint(0, len(dataset), (args.num_libraries,))
+        for k in range(args.num_libraries):
     
+            logger.info("Initialisation for Library %d", k)
+            for i in tqdm(range(args.pre_num_iters), desc=f"Init. Iterations Lib {k}", position=0, leave=True):
+                batch = dataset.sample(rdm_idxs[k])
+                batch = tuple(t.unsqueeze(0).to(args.device) for t in batch)
+    
+                # Get the response log-probability of the sample coming from the latent prompt of library k
+                resp_log_prob = get_response_log_probs(args, batch, tokenizer, model, k)
+    
+                loss = -resp_log_prob.sum()  # responsibility = 1 for the sample coming from the latent prompt of library k
+    
+                # Update the model parameters
+                loss.backward()
+                optimizer.step()
+                lr_scheduler.step()  # Make sure this is constant schedule with no warmup
+                optimizer.zero_grad()
+    
+                logger.info(f"Iter {i} Loss: {loss.detach().cpu().numpy().item()}")
+    
+    # ################################################## EM ####################################################### #
     # Let's do EM to update the model with prompt-tuning
     for i in tqdm(range(args.num_iters), desc="EM Iterations", position=0, leave=True):
         
@@ -247,13 +252,13 @@ def learn(args):
             lib_train_logs.update({'q_func': q_func})
             wandb.log(lib_train_logs, step=i)
         
-    # ##################################################################################################### #
+    # ################################################ Save Model ################################################## #
     # Save the model (by saving the trained embeddings for the latent prompt of each library)
     model = unwrap_model(model)
     logger.info("Saving the model at: %s", args.save_at)
     model.save_pretrained(save_directory=args.save_at)
     
-    # ##################################################################################################### #
+    # ####################################### Compute final responsibilities ####################################### #
     # Debug by showing the responsibilities of each sample
     logger.info("\n\n# ################# Responsibilities ################# #")
     for i in tqdm(range(len(dataset)), desc="Computing Final Responsibilities", position=0, leave=True):
@@ -262,19 +267,20 @@ def learn(args):
         batch = tuple(t.unsqueeze(0).to(args.device) for t in batch)
         
         responsibilities = compute_responsibilities(args, batch, tokenizer, model)
+        # Debug by showing the responsibilities of each sample
         logger.info(f"[Responsibilities] {dataset.ids[i]}: {responsibilities.cpu().numpy()[0].tolist()}")
         
 
 def get_config():
     data_type = "libraryCustom"
-    model_type = "codellama/CodeLlama-7b-Python-hf"  # codegen2-1B, codegen-350M
+    model_type = "codegen2-1B"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf, codegen2-3_7B
     huggingface_path = get_huggingface_path(model_type)
     
     parser = argparse.ArgumentParser()
     
     # Paths
     parser.add_argument('--wandb_logging', type=bool, default=True)
-    parser.add_argument('--wandb_prog', type=str, default='PromptTuningModel')
+    parser.add_argument('--project_name', type=str, default='PromptTuningModel')
     parser.add_argument('--path_to_data', type=str, default='./sample_codes_processed')
     parser.add_argument('--save_at', type=str, default=log_dir + '/PromptTuningMultiModel')
     
@@ -291,7 +297,7 @@ def get_config():
     parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
     
     # Training
-    parser.add_argument("--num_iters", default=500, type=int)
+    parser.add_argument("--num_iters", default=50, type=int)
     parser.add_argument("--pre_num_iters", default=10, type=int)
     parser.add_argument("--per_gpu_train_batch_size", default=1, type=int)
     parser.add_argument("--lr", default=5e-5, type=float,
@@ -324,10 +330,6 @@ def get_config():
     config = {key: str(value) for key, value in config.items()}
     config = OrderedDict(sorted(config.items()))
     logger.info(json.dumps(config, indent=4))
-    
-    # Initialise wandb
-    if args.wandb_logging:
-        wandb.init(project=args.wandb_prog, config=config)
     
     return args
     
