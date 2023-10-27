@@ -11,124 +11,6 @@ from tqdm import tqdm
 from utils.reindent import reindent_code
 
 
-class LibraryBaseDataset(Dataset):
-	def __init__(self, path_to_data: str, tokenizer, max_prompt_length, max_response_length):
-		self.path_to_data = path_to_data
-		self.tokenizer = tokenizer
-		self.max_prompt_length = max_prompt_length
-		self.max_response_length = max_response_length
-		self.max_length = max_prompt_length + max_response_length
-		
-		self.data = self.read_data()
-		self.ids: List[str] = list(self.data.keys())
-	
-	def read_data(self):
-		raise NotImplementedError
-	
-	def sample(self, idx: int):
-		raise NotImplementedError
-	
-	def process(self, src_input_ids, trg_label_ids):
-		
-		if len(src_input_ids) < self.max_length:
-			# Pad input with eos token
-			new_input_ids = [self.tokenizer.eos_token_id] * self.max_length
-			new_input_ids[:len(src_input_ids)] = src_input_ids
-			src_input_ids = new_input_ids
-			
-			# Pad label with -100
-			new_label_ids = [-100] * self.max_length
-			new_label_ids[:len(trg_label_ids)] = trg_label_ids
-			trg_label_ids = new_label_ids
-		
-		# Convert to tensors
-		src_input_ids = torch.LongTensor(src_input_ids)
-		trg_label_ids = torch.LongTensor(trg_label_ids)
-		
-		src_mask = src_input_ids.ne(self.tokenizer.eos_token_id)  # mask out padding
-		trg_mask = trg_label_ids.ne(-100)  # mask out padding
-		
-		return src_input_ids, src_mask, trg_label_ids, trg_mask
-	
-	def __getitem__(self, idx):
-		return self.sample(idx)
-	
-	def __len__(self):
-		return len(self.data)
-	
-	def __repr__(self):
-		return f"Dataset({self.path_to_data})"
-	
-	def __str__(self):
-		return f"Dataset({self.path_to_data})"
-	
-	def __iter__(self):
-		return iter(self.data)
-	
-	def __contains__(self, item):
-		return item in self.data
-	
-	def __add__(self, other):
-		return self.data + other.data
-
-
-class LibrarySampleDataset(LibraryBaseDataset):
-	
-	def __init__(
-			self,
-			path_to_data: str,
-			tokenizer: Any,
-			max_prompt_length: int,
-			max_response_length: int,
-			sample_problems: Union[int, None] = None
-	):
-		
-		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
-		super().__init__(path_to_data, tokenizer, max_prompt_length, max_response_length)
-	
-	def read_data(self, read_labels: bool = False):
-		
-		"""
-		Each file follows the convention k<cluster_id>_<specific_method_name>_<library>.py
-		
-		:return:
-		"""
-		
-		# Read (processed) python files from the given path
-		files = os.listdir(self.path_to_data)
-		files = [f for f in files if f.endswith('.py')]
-		
-		f_ids: List[str] = []
-		data: Dict[str, str] = {}
-		for f in tqdm(files, desc='Reading files', total=len(files)):
-			with open(os.path.join(self.path_to_data, f), 'r') as file:
-				prog_instructions: List[str] = file.readlines()
-			
-			program = '\n'.join(prog_instructions)
-			# label = f.split('_')[-1].split('.')[0] if read_labels else None
-			data[f] = program
-		
-		return data
-	
-	def sample(self, idx: int):
-		program = self.data[self.ids[idx]]
-		
-		program_tokens = self.tokenizer.tokenize(program)
-		# label_tokens = self.tokenizer.tokenize(label) if label is not None else None
-		
-		# Truncate the program + label tokens if it exceeds the max length (from left)
-		max_length = self.max_length - 1  # for start token
-		if len(program_tokens) > max_length:
-			program_tokens = program_tokens[-max_length:]
-		
-		program_token_ids = self.tokenizer.convert_tokens_to_ids(program_tokens)
-		
-		src_input_ids = [self.tokenizer.bos_token_id] + program_token_ids
-		trg_label_ids = program_token_ids + [self.tokenizer.eos_token_id]
-		
-		return self.process(src_input_ids, trg_label_ids)
-
-
 def generate_apps_prompt(problem, tokenizer=None, peek_frac=0.0):
 	prob_path = os.path.join(problem)
 	test_case_path = os.path.join(prob_path, "input_output.json")
@@ -191,13 +73,181 @@ def generate_apps_prompt(problem, tokenizer=None, peek_frac=0.0):
 	return _input
 
 
-class APPSBaseDataset(LibraryBaseDataset):
+class LibraryBaseDataset(Dataset):
+	def __init__(self, path_to_data: str, tokenizer, max_prompt_length, max_length, mode: str = 'train',
+				 return_dict: bool = False):
+		self.path_to_data = path_to_data
+		self.tokenizer = tokenizer
+		self.max_prompt_length = max_prompt_length
+		self.max_length = max_length
+		self.mode = mode
+		self.return_dict = return_dict
+		
+		# Read Data
+		self.data = self.read_data()
+		self.ids: List[str] = list(self.data.keys())
+	
+	def read_data(self):
+		raise NotImplementedError
+	
+	def sample(self, idx: int):
+		q_str, a_str = self.data[self.ids[idx]]
+		question_token_ids = self.tokenizer.encode(q_str, verbose=False)
+		question_token_ids = question_token_ids[-self.max_prompt_length:]  # Truncate the prompt from left
+		
+		if self.mode == 'test':
+			# Pad from left
+			if len(question_token_ids) < self.max_prompt_length:
+				new_input_ids = [self.tokenizer.eos_token_id] * self.max_prompt_length
+				new_input_ids[-len(question_token_ids):] = question_token_ids
+				question_token_ids = new_input_ids
+				
+			# No need to pad for test and add the solution
+			question_token_ids = torch.LongTensor(question_token_ids)
+			mask = question_token_ids.ne(self.tokenizer.eos_token_id)
+			return question_token_ids, mask
+		
+		else:
+			answer_token_ids = self.tokenizer.encode(a_str, verbose=False)
+			answer_token_ids.append(self.tokenizer.eos_token_id)
+			
+			src_input_ids = []
+			trg_label_ids = []
+			src_input_ids.extend(question_token_ids)
+			src_input_ids.extend(answer_token_ids)
+			trg_label_ids.extend([-100] * len(question_token_ids))
+			trg_label_ids.extend(answer_token_ids)
+			
+			# Cut off the excess
+			if len(src_input_ids) > self.max_length:
+				# Truncate i/p, label from right (this will auto. truncate only the response)
+				src_input_ids = src_input_ids[:self.max_length]
+				trg_label_ids = trg_label_ids[:self.max_length]
+			
+			# # Print the shapes
+			# print(f"[Debug] src_input_ids: {len(src_input_ids)}")
+			# print(f"[Debug] trg_label_ids: {len(trg_label_ids)}")
+			
+			return self.process(src_input_ids, trg_label_ids)
+	
+	def process(self, src_input_ids, trg_label_ids):
+		
+		if len(src_input_ids) < self.max_length:
+			# Pad input [prompt+response] with eos token from right
+			new_input_ids = [self.tokenizer.eos_token_id] * self.max_length
+			new_input_ids[:len(src_input_ids)] = src_input_ids
+			src_input_ids = new_input_ids
+			
+			# Pad label with -100
+			new_label_ids = [-100] * self.max_length
+			new_label_ids[:len(trg_label_ids)] = trg_label_ids
+			trg_label_ids = new_label_ids
+		
+		# Convert to tensors
+		src_input_ids = torch.LongTensor(src_input_ids)
+		trg_label_ids = torch.LongTensor(trg_label_ids)
+		
+		src_mask = src_input_ids.ne(self.tokenizer.eos_token_id)  # mask out padding
+		trg_mask = trg_label_ids.ne(-100)  # mask out padding
+		
+		if self.return_dict:
+			return {
+				"input_ids": src_input_ids,
+				"attention_mask": src_mask,
+				"labels": trg_label_ids
+			}
+		else:
+			return src_input_ids, src_mask, trg_label_ids, trg_mask
+	
+	def __getitem__(self, idx):
+		return self.sample(idx)
+	
+	def __len__(self):
+		return len(self.data)
+	
+	def __repr__(self):
+		return f"Dataset({self.path_to_data})"
+	
+	def __str__(self):
+		return f"Dataset({self.path_to_data})"
+	
+	def __iter__(self):
+		return iter(self.data)
+	
+	def __contains__(self, item):
+		return item in self.data
+	
+	def __add__(self, other):
+		return self.data + other.data
+	
+	def get_ids(self):
+		return self.ids
+
+
+class Sample_Dataset(LibraryBaseDataset):
+	
+	def __init__(
+			self,
+			path_to_data: str,
+			tokenizer: Any,
+			max_prompt_length: int,
+			max_length: int,
+			sample_problems: Union[int, None] = None
+	):
+		
+		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
+		super().__init__(path_to_data, tokenizer, max_prompt_length, max_length)
+	
+	def read_data(self, read_labels: bool = False):
+		
+		"""
+		Each file follows the convention k<cluster_id>_<specific_method_name>_<library>.py
+		
+		:return:
+		"""
+		
+		# Read (processed) python files from the given path
+		files = os.listdir(self.path_to_data)
+		files = [f for f in files if f.endswith('.py')]
+		
+		f_ids: List[str] = []
+		data: Dict[str, str] = {}
+		for f in tqdm(files, desc='Reading files', total=len(files)):
+			with open(os.path.join(self.path_to_data, f), 'r') as file:
+				prog_instructions: List[str] = file.readlines()
+			
+			program = '\n'.join(prog_instructions)
+			# label = f.split('_')[-1].split('.')[0] if read_labels else None
+			data[f] = program
+		
+		return data
+	
+	def sample(self, idx: int):
+		program = self.data[self.ids[idx]]
+		
+		program_tokens = self.tokenizer.tokenize(program)
+		# label_tokens = self.tokenizer.tokenize(label) if label is not None else None
+		
+		# Truncate the program + label tokens if it exceeds the max length (from left)
+		max_length = self.max_length - 1  # for start token
+		if len(program_tokens) > max_length:
+			program_tokens = program_tokens[-max_length:]
+		
+		program_token_ids = self.tokenizer.convert_tokens_to_ids(program_tokens)
+		
+		src_input_ids = [self.tokenizer.bos_token_id] + program_token_ids
+		trg_label_ids = program_token_ids + [self.tokenizer.eos_token_id]
+		
+		return self.process(src_input_ids, trg_label_ids)
+
+
+class APPS_Dataset(LibraryBaseDataset):
 	def __init__(
 			self,
 			path_to_data: str,
 			tokenizer: Any,
 			max_prompt_length: int = 512,
-			max_response_length: int = 512,
+			max_length: int = 512,
 			mode: str = 'train',
 			sample_problems: Union[int, None] = None
 	):
@@ -205,10 +255,9 @@ class APPSBaseDataset(LibraryBaseDataset):
 		# # Initialize mode before calling super().__init__
 		# max_length=2048 if ('EleutherAI' in args.arch or '2700' in args.load) else 1024 <- From APPS github repo
 		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
-		self.mode = mode
-		path_to_data = os.path.join(path_to_data, 'train')
+		path_to_data = os.path.join(path_to_data, mode)
 		
-		super().__init__(path_to_data, tokenizer, max_prompt_length, max_response_length)
+		super().__init__(path_to_data, tokenizer, max_prompt_length, max_length, mode)
 	
 	def read_data(self):
 		"""
@@ -252,34 +301,45 @@ class APPSBaseDataset(LibraryBaseDataset):
 		
 		print(f"Skipped {len(skipped_problems)} problems! Mode is {self.mode}")
 		return data
+
+
+class MBPP_Dataset(LibraryBaseDataset):
+	def __init__(
+			self,
+			path_to_data: str,
+			tokenizer: Any,
+			max_prompt_length: int = 512,
+			max_length: int = 512,
+			mode: str = 'train',
+			sample_problems: Union[int, None] = None,
+			split: float = 0.5
+	):
+		# # Initialize mode before calling super().__init__
+		# max_length=2048 if ('EleutherAI' in args.arch or '2700' in args.load) else 1024 <- From APPS github repo
+		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
+		self.split = split
+		
+		super().__init__(path_to_data, tokenizer, max_prompt_length, max_length, mode)
 	
-	def sample(self, idx: int):
+	def read_data(self):
+		with open(self.path_to_data, 'r') as f:
+			data = f.readlines()
 		
-		q_str, a_str = self.data[self.ids[idx]]
-		question_token_ids = self.tokenizer.encode(q_str, verbose=False)
-		question_token_ids = question_token_ids[-self.max_prompt_length:]  # Truncate the prompt from left
+		data = [json.loads(d) for d in data]
 		
-		if self.mode == 'test':
-			# No need to pad for test and add the solution
-			question_token_ids = torch.LongTensor(question_token_ids)
-			mask = question_token_ids.ne(self.tokenizer.eos_token_id)
-			return question_token_ids, mask
+		# Divide into train-test
+		if self.mode == 'train':
+			data = data[:int(self.split * len(data))]
+		elif self.mode == 'test':
+			data = data[int(self.split * len(data)):]
 		
-		else:
-			answer_token_ids = self.tokenizer.encode(a_str, verbose=False)
-			answer_token_ids.append(self.tokenizer.eos_token_id)
-			
-			src_input_ids = []
-			trg_label_ids = []
-			src_input_ids.extend(question_token_ids)
-			src_input_ids.extend(answer_token_ids)
-			trg_label_ids.extend([-100] * len(question_token_ids))
-			trg_label_ids.extend(answer_token_ids)
-			
-			# CUT OFF THE EXCESS
-			if len(src_input_ids) > self.max_length:
-				# Truncate i/p, label from right (this will auto. truncate the response)
-				src_input_ids = src_input_ids[self.max_length:]
-				trg_label_ids = trg_label_ids[self.max_length:]
-				
-			return self.process(src_input_ids, trg_label_ids)
+		partitioned_data = {}
+		for problem in tqdm(data, ncols=0, total=len(data),
+							desc="Reading MBPP examples from {} (mode = {}): ".format(self.path_to_data,
+																					  self.mode)):
+			f_id = problem['task_id']
+			q_str = problem['prompt']
+			a_str = problem['canonical_solution']
+			partitioned_data[f_id] = (q_str, a_str)
+		
+		return partitioned_data

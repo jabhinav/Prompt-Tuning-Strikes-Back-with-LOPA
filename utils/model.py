@@ -7,6 +7,7 @@ from transformers import RobertaModel, T5ForConditionalGeneration, BartForCondit
 	OpenAIGPTLMHeadModel, BertForMaskedLM, DistilBertForMaskedLM, GPTNeoForCausalLM, AutoModel, AutoModelForCausalLM
 from transformers import RobertaTokenizer, T5Tokenizer, BartTokenizer, GPT2Tokenizer, OpenAIGPTTokenizer, \
 	BertTokenizer, DistilBertTokenizer, AutoTokenizer, CodeGenTokenizer, CodeGenTokenizerFast
+from utils.custom import is_rank_0
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,8 @@ def load_tokenizer(model_type, tokenizer_name):
 		tokenizer_class = TOKENIZER_CLASSES[model_type]
 	else:
 		tokenizer_class = AutoTokenizer
-		print("Using AutoTokenizer for model_type: ", model_type)
+		if is_rank_0():
+			print("Using AutoTokenizer for model_type: ", model_type)
 	
 	tokenizer = tokenizer_class.from_pretrained(tokenizer_name, trust_remote_code=True)
 	
@@ -103,16 +105,28 @@ def load_tokenizer(model_type, tokenizer_name):
 		if not hasattr(tokenizer, 'errors'):
 			tokenizer.errors = tokenizer_subclass.errors
 	
-	logger.info("Finish loading Tokenizer from %s", tokenizer_name)
+	if is_rank_0():
+		logger.info("Finish loading Tokenizer from %s", tokenizer_name)
 	return tokenizer
 
 
-def load_base_model(model_type, config_name=None, model_path=None):
+def load_base_model(model_type, config_name=None, model_path=None, load_in_8bit: bool = False):
 	config_class, model_class = MODEL_CLASSES[model_type]
-	config = config_class.from_pretrained(config_name if config_name else model_path, trust_remote_code=True, revision="main")
-	model = model_class.from_pretrained(model_path, trust_remote_code=True, revision="main")
 	
-	logger.info("Finish loading Base model [%s] from %s", get_model_size(model), model_path)
+	config = config_class.from_pretrained(
+		config_name if config_name else model_path,
+		trust_remote_code=True,
+		revision="main"
+	)
+	model = model_class.from_pretrained(
+		model_path,
+		trust_remote_code=True,
+		revision="main",
+		load_in_8bit=load_in_8bit
+	)
+	
+	if is_rank_0():
+		logger.info("Finish loading Base model [%s] from %s", get_model_size(model), model_path)
 	return config, model
 
 
