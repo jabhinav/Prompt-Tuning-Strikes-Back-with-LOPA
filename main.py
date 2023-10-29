@@ -15,6 +15,7 @@ from transformers.modeling_utils import unwrap_model
 
 import logging
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType
+from utils.config import get_config
 from utils.custom import create_dir, set_dist, set_seed, log_dist, debug_memory
 from utils.data import MBPP_Dataset as CustomDataset
 from utils.model import load_tokenizer, load_base_model, get_huggingface_path
@@ -133,7 +134,8 @@ def learn(args, logger):
 	_, model = load_base_model(
 		model_type=args.model_type,
 		config_name=args.config_name,
-		model_path=args.model_name_or_path
+		model_path=args.model_name_or_path,
+		load_in_8bit=args.load_in_8bit
 	)
 	
 	# Load checkpoint
@@ -163,12 +165,6 @@ def learn(args, logger):
 	if args.n_gpu > 1:
 		model = torch.nn.DataParallel(model)
 		
-	
-	debug_memory("After Loading Model GPU 0", device=0)
-	debug_memory("After Loading Model GPU 0", device=1)
-	sys.exit(-1)
-	
-	
 	# Get the optimizer
 	optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 	lr_scheduler = get_constant_schedule_with_warmup(
@@ -286,111 +282,8 @@ def learn(args, logger):
 		responsibilities = compute_responsibilities(args, batch, tokenizer, model)
 		# Debug by showing the responsibilities of each sample
 		logger.info(f"[Responsibilities] {dataset.ids[i]}: {responsibilities.cpu().numpy()[0].tolist()}")
-
-
-def get_config():
-	# Create a directory to store the logs
-	current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-	log_dir = os.path.join('./logging', current_time)
-	create_dir(log_dir)
-	
-	# Configure logging
-	logging.basicConfig(filename=os.path.join(log_dir, 'logs.txt'), filemode='w',
-						format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-						datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO)
-	logger = logging.getLogger(__name__)
-	logger.info("\n\n# ################# Learning Libraries ################# #\n\n")
-	
-	# Define the parameters
-	model_type = "codegen-350M"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
-	huggingface_path = get_huggingface_path(model_type)
-	
-	parser = argparse.ArgumentParser()
-	
-	# High-level
-	parser.add_argument('--wandb_logging', type=bool, default=False)
-	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
-	parser.add_argument('--do_peft', type=bool, default=False)
-	parser.add_argument('--seed', type=int, default=1234, help="random seed for initialization")
-	
-	# Paths
-	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')
-	parser.add_argument('--save_at', type=str, default=log_dir + '/PromptTuningMultiModel')
-	parser.add_argument('--load_adapter_from', type=str, default=None)  # Path to dir
-	parser.add_argument('--load_base_from_path', type=str, default=None)
-	
-	# Prompt Tuning Parameters
-	parser.add_argument('--max_prefix_length', type=int, default=0)
-	parser.add_argument('--num_virtual_tokens', type=int, default=10)
-	parser.add_argument('--max_prompt_length', type=int, default=325)  # Max 384
-	parser.add_argument('--max_length', type=int, default=325 + 256)  # Max 384+512
-	parser.add_argument('--num_libraries', type=int, default=5)
-	
-	# Model
-	parser.add_argument("--model_type", type=str, default=model_type)
-	parser.add_argument("--model_name_or_path", type=str, default=huggingface_path)
-	parser.add_argument("--config_name", type=str, default=huggingface_path)
-	parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
-	
-	# Training
-	parser.add_argument("--num_epochs", type=int, default=20)
-	parser.add_argument("--pre_num_iters", type=int, default=0)
-	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)
-	parser.add_argument("--lr", type=float, default=5e-5)
-	
-	# Others
-	parser.add_argument("--num_test_problems", type=int, default=None, choices=[None, 100])
-	parser.add_argument("--num_train_problems", type=int, default=None, choices=[None, 100])
-	parser.add_argument("--infer_final_responsibilities", type=bool, default=False)
-	
-	# Evaluation
-	parser.add_argument("--save_results_at", type=str, default=os.path.join(log_dir, 'all_codes.json'))
-	parser.add_argument("--num_beams", type=int, default=1)
-	parser.add_argument("--max_new_tokens", type=int, default=256)
-	parser.add_argument("--do_sample", type=bool, default=True)
-	parser.add_argument("--num_return_sequences", type=int, default=5)
-	parser.add_argument("--num_return_sequences_per_iter", type=int, default=5)
-	parser.add_argument("--temperature", type=float, default=0.6)
-	parser.add_argument("--top_p", type=float, default=0.95)
-	
-	# Hardware configuration
-	parser.add_argument("--no_cuda",
-						help="Avoid using CUDA when available")
-	parser.add_argument('--fp16', default=True, action='store_true',
-						help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
-	parser.add_argument("--local_rank", type=int, default=-1,
-						help="For distributed training (multi-node): local_rank")
-	parser.add_argument('--db', default=False,
-						help='set to turn on debug mode i.e. using dummy small data split and only 1 data worker')
-	parser.add_argument("--node_index", type=int, default=-1,
-						help="node index if multi-node running")
-	parser.add_argument("--gpu_per_node", type=int, default=4,
-						help="num of gpus per node")
-	
-	args = parser.parse_args()
-	
-	args.log_dir = log_dir
-	# Update the max_length and max_prompt_length by deducting the number of virtual tokens
-	args.max_length = args.max_length - args.num_virtual_tokens
-	args.max_prompt_length = args.max_prompt_length - args.num_virtual_tokens
-	# Update the number of lib if peft is not used
-	if not args.do_peft:
-		args.num_libraries = 1
-	
-	set_dist(args, logger)
-	set_seed(args)
-	
-	# Log the config
-	config: dict = vars(args)
-	config = {key: str(value) for key, value in config.items()}
-	config = OrderedDict(sorted(config.items()))
-	
-	log_dist(logger, message="\n\n# ############### PEFT ############## #\n\n", level=logging.INFO, ranks=[0])
-	log_dist(logger, message=json.dumps(config, indent=4), level=logging.INFO, ranks=[0])
-	
-	return args, logger
-
-
+		
+		
 def main():
 	args, logger = get_config()
 	learn(args, logger)

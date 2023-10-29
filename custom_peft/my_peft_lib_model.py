@@ -732,11 +732,12 @@ class PeftMultiModelForCausalLM(PeftMultiModel):
 		super().__init__(model, peft_config, adapter_name)
 		# # Store the base model's prepare_inputs_for_generation method (use to revert when there is an error)
 		self.base_model_prepare_inputs_for_generation = self.base_model.prepare_inputs_for_generation
-		# Initialize the library_idx
+		# Initialize the library_idx <- [Hack] will be used during generate API, not in FWD pass
 		self.library_idx = None
 	
 	def forward(
 			self,
+			library_idx=None,
 			input_ids=None,
 			attention_mask=None,
 			inputs_embeds=None,
@@ -748,8 +749,6 @@ class PeftMultiModelForCausalLM(PeftMultiModel):
 	):
 		
 		# Get the library idx
-		library_idx = self.library_idx
-		# library_idx = kwargs.get("library_idx", None)
 		if library_idx is None:
 			raise ValueError("library_idx is not provided in generate")
 		

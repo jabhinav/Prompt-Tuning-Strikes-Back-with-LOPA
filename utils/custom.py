@@ -73,7 +73,6 @@ def is_rank_0() -> bool:
 
 
 def log_dist(
-		logger,
 		message: str,
 		ranks: List[int],
 		level: int = logging.INFO
@@ -96,7 +95,7 @@ def create_dir(path: str):
 	_dir.mkdir(parents=True, exist_ok=True)
 
 
-def set_dist(args, logger):
+def set_dist(args):
 	
 	# To train on cpu, set args.no_cuda=True else it will use all available gpus [Recommended use for now]
 	if args.local_rank == -1 or args.no_cuda:
@@ -133,11 +132,15 @@ def set_seed(args):
 		torch.cuda.manual_seed_all(args.seed)
 
 
-def save_predictions_mbxp_format(args, logger, output: Dict[str, Dict[str, List[str]]], lang='python', d_type='MBPP'):
+def save_predictions_mbxp_format(
+		args,
+		output: Dict[str, Dict[str, List[str]]],
+		lang='python',
+		d_type='MBPP'
+):
 	"""
 	Save the predictions in the format required by the MBXP evaluation script.
 	:param args:
-	:param logger:
 	:param output:
 	:param lang:
 	:param d_type:
@@ -153,12 +156,13 @@ def save_predictions_mbxp_format(args, logger, output: Dict[str, Dict[str, List[
 						"task_id":  problem,
 						"language": lang,
 						"completion": response,
+						"data_type": d_type
 					}
 					file.write(json.dumps(result_dict) + '\n')
 					
 		logger.info(f"Saved predictions for library {k} in the format required by the MBXP evaluation script")
 		
-	# Save all the predictions in a single file
+	# Flatten all the predictions in a single file
 	with open(os.path.join(args.log_dir, f'mbxp_solutions.json'), 'w') as file:
 		for problem in output:
 			for k in range(args.num_libraries):
@@ -167,7 +171,42 @@ def save_predictions_mbxp_format(args, logger, output: Dict[str, Dict[str, List[
 						"task_id":  problem,
 						"language": lang,
 						"completion": response,
+						"data_type": d_type
 					}
 					file.write(json.dumps(result_dict) + '\n')
 					
 	logger.info(f"Saved all predictions in a single file in the format required by the MBXP evaluation script")
+
+
+def save_best_lib_predictions_mbxp_format(
+		args,
+		output: Dict[str, Dict[str, List[str]]],
+		lib_mapping: Dict[str, int],
+		lang='python',
+		d_type='MBPP'
+):
+	"""
+	Save the predictions in the format required by the MBXP evaluation script.
+	:param args:
+	:param output:
+	:param lib_mapping:
+	:param lang:
+	:param d_type:
+	:return:
+	"""
+	
+	# Flatten all the predictions in a single file
+	with open(os.path.join(args.log_dir, f'mbxp_solutions_best_lib.json'), 'w') as file:
+		for problem in output:
+			k = lib_mapping[problem]
+			for response in output[problem][f'lib_{k}']:
+				result_dict: dict = {
+					"task_id": problem,
+					"language": lang,
+					"completion": response,
+					"library": f"lib_{k}",
+					"data_type": d_type
+				}
+				file.write(json.dumps(result_dict) + '\n')
+	
+	logger.info(f"Saved best lib predictions in a single file in the format required by the MBXP evaluation script")

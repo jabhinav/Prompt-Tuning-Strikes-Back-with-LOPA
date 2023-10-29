@@ -1,9 +1,7 @@
-import argparse
 import json
 import os
 from collections import OrderedDict
 from typing import Dict, List
-from datetime import datetime
 
 import torch
 import torch.nn.functional as F
@@ -12,12 +10,11 @@ from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
 from transformers import get_constant_schedule_with_warmup
 
-import logging
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftMultiModel
-from utils.custom import TorchTracemalloc, create_dir, is_rank_0, log_dist, set_dist, set_seed, \
-	save_predictions_mbxp_format
+from utils.config import get_config
+from utils.custom import TorchTracemalloc, save_predictions_mbxp_format, save_best_lib_predictions_mbxp_format
 from utils.data import MBPP_Dataset as CustomDataset
-from utils.model import load_tokenizer, load_base_model, get_huggingface_path
+from utils.model import load_tokenizer, load_base_model
 
 
 def logprobs_from_logits(logits, labels):
@@ -64,6 +61,8 @@ def get_response_log_probs(args, batch, tokenizer, model, library_idx):
 	
 	return resp_log_prob
 
+	
+
 
 @torch.no_grad()
 def compute_responsibilities(args, batch, tokenizer, model) -> torch.Tensor:
@@ -90,6 +89,55 @@ def compute_responsibilities(args, batch, tokenizer, model) -> torch.Tensor:
 	responsibilities = F.softmax(likelihood, dim=1)
 	
 	return responsibilities.detach()
+
+
+@torch.no_grad()
+def get_library_index(args, prompt, prompt_mask, tokenizer, model):
+	"""
+	:param args:
+	:param prompt: (batch_size, seq_len)
+	:param prompt_mask: (batch_size, seq_len)
+	:param tokenizer:
+	:param model:
+	:return: library_idx: int
+	"""
+	
+	batch_size = prompt.size(0)
+	max_likelihood = -float('inf')
+	library_idx = None
+	
+	for k in range(args.num_libraries):
+		prompt_logits = model(
+			library_idx=k,
+			input_ids=prompt,
+			attention_mask=prompt_mask,
+			labels=prompt,
+			output_hidden_states=True
+		)['logits']
+		
+		# # Append labels [=-100] for the latent prompt to the prompt
+		prefix = torch.full((batch_size, args.num_virtual_tokens), -100).to(prompt.device)
+		prompt = torch.cat((prefix, prompt), dim=1)
+		# # Append response_mask with 0s for the latent prompt (not the mask for attending to latent prompt)
+		prefix_resp_mask = torch.zeros((batch_size, args.num_virtual_tokens)).to(prompt.device)
+		prompt_mask = torch.cat((prefix_resp_mask, prompt_mask), dim=1)
+		
+		prompt[prompt == -100] = tokenizer.pad_token_id  # Replace -100 with pad_token_id
+		prompt = prompt.contiguous()
+		
+		prompt_log_prob = logprobs_from_logits(prompt_logits, prompt)
+		prompt_log_prob = prompt_log_prob * prompt_mask
+		
+		# Likelihood of the prompt coming from the latent prompt of library k
+		prompt_log_prob = prompt_log_prob.sum(dim=1)
+		
+		# Update the library index
+		if prompt_log_prob > max_likelihood:
+			max_likelihood = prompt_log_prob
+			library_idx = k
+			
+	return library_idx
+
 
 
 def learn(args, logger):
@@ -140,7 +188,8 @@ def learn(args, logger):
 	_, model = load_base_model(
 		model_type=args.model_type,
 		config_name=args.config_name,
-		model_path=args.model_name_or_path
+		model_path=args.model_name_or_path,
+		load_in_8bit=args.load_in_8bit
 	)
 	# Load checkpoint
 	if args.load_base_from_path is not None:
@@ -162,7 +211,8 @@ def learn(args, logger):
 	
 	if accelerator.is_local_main_process:
 		trainable_params, all_param = model.get_nb_trainable_parameters()
-		msg = f"trainable params: {trainable_params:,d} || all params: {all_param:,d} || trainable%: {100 * trainable_params / all_param}"
+		msg = (f"trainable params: {trainable_params:,d} || all params: {all_param:,d} ||"
+			   f" trainable%: {100 * trainable_params / all_param}")
 		logger.info(msg)
 		print(msg)  # Prompt tuning: embedding_dim * num_virtual_tokens * num_libraries
 	
@@ -177,9 +227,9 @@ def learn(args, logger):
 		model, optimizer, train_dataloader, lr_scheduler
 	)
 	
-	is_ds_zero_3 = False
-	if getattr(accelerator.state, "deepspeed_plugin", None):
-		is_ds_zero_3 = accelerator.state.deepspeed_plugin.zero_stage == 3
+	# is_ds_zero_3 = False
+	# if getattr(accelerator.state, "deepspeed_plugin", None):
+	# 	is_ds_zero_3 = accelerator.state.deepspeed_plugin.zero_stage == 3
 		
 	if accelerator.is_local_main_process:
 		logger.info("Starting EM for Library Learning")
@@ -342,7 +392,8 @@ def evaluate(args, logger):
 	_, model = load_base_model(
 		model_type=args.model_type,
 		config_name=args.config_name,
-		model_path=args.model_name_or_path
+		model_path=args.model_name_or_path,
+		load_in_8bit=args.load_in_8bit
 	)
 	
 	# Load checkpoint
@@ -384,15 +435,23 @@ def evaluate(args, logger):
 	# Predict for each sample output by each library
 	num_loops = int(args.num_return_sequences / args.num_return_sequences_per_iter)
 	
-	output: Dict[str, Dict[str, List[str]]] = {}
+	oracle_output: Dict[str, Dict[str, List[str]]] = {}
+	lib_mapping:  Dict[str, int] = {}
+	
 	model.eval()
 	
 	for index in tqdm(range(len(dataset)), desc="Predicting", position=0, leave=True):
-		batch = dataset.sample(index)
-		batch = tuple(t.unsqueeze(0).to(args.device) for t in batch)
-		input_ids, attention_mask = batch
+		sample = dataset.sample(index)
+		sample = tuple(tensor.unsqueeze(0).to(args.device) for tensor in sample)
+		input_ids, attention_mask = sample
 		
-		library_predictions: Dict[str, List[str]] = OrderedDict()
+		# ############################## Add logic for identifying the library index ############################## #
+		chosen_lib_idx = None
+		if args.do_peft:
+			chosen_lib_idx = get_library_index(args, input_ids, attention_mask, tokenizer, model)
+			
+		
+		all_library_predictions: Dict[str, List[str]] = OrderedDict()
 		for k in range(args.num_libraries):
 			
 			# Set the library index
@@ -416,7 +475,7 @@ def evaluate(args, logger):
 					)
 				
 					top_responses = top_responses.detach().cpu().numpy().tolist()
-					top_responses = [resp[batch[0].shape[1]:] for resp in top_responses]
+					top_responses = [resp[sample[0].shape[1]:] for resp in top_responses]
 					top_responses = [tokenizer.decode(resp, skip_special_tokens=False) for resp in top_responses]
 					# Split the response at the first occurrence of the end of text token.
 					# This works since we append the eos token to responses and make the model predict it
@@ -443,120 +502,23 @@ def evaluate(args, logger):
 			# if len(prediction):
 			# 	prediction = prediction.split("ANSWER:\n")[1].replace("<|endoftext|>", "")
 			
-			library_predictions[f'lib_{k}'] = all_responses
+			all_library_predictions[f'lib_{k}'] = all_responses
 				
-		output[dataset.ids[index]] = library_predictions
+		oracle_output[dataset.ids[index]] = all_library_predictions
+		
+		if chosen_lib_idx is not None:
+			lib_mapping[dataset.ids[index]] = int(chosen_lib_idx)
 			
 	# Save the output
 	# print(json.dumps(output, indent=4))
 	with open(args.save_results_at, 'w') as f:
-		json.dump(output, f, indent=4)
+		json.dump(oracle_output, f, indent=4)
 	
-	save_predictions_mbxp_format(args, logger, output, lang='python', d_type='MBPP')
+	# Save the output for the best chosen libraries
+	if lib_mapping:
+		save_best_lib_predictions_mbxp_format(args, oracle_output, lib_mapping, lang='python', d_type='MBPP')
 	
-
-def get_config():
-	# Create a directory to store the logs
-	current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-	log_dir = os.path.join('./logging', current_time)
-	create_dir(log_dir)
-	
-	# Configure logging
-	if is_rank_0():
-		logging.basicConfig(filename=os.path.join(log_dir, 'logs.txt'), filemode='w',
-							format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-							datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO)
-	logger = logging.getLogger(__name__)
-	logger.info("\n\n# ################# Learning Libraries ################# #\n\n")
-	
-	# Define the parameters
-	model_type = "codegen2-1B"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
-	huggingface_path = get_huggingface_path(model_type)
-	
-	parser = argparse.ArgumentParser()
-	
-	# High-level
-	parser.add_argument('--wandb_logging', type=bool, default=False)
-	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
-	parser.add_argument('--do_peft', type=bool, default=False)
-	parser.add_argument('--seed', type=int, default=1234, help="random seed for initialization")
-	
-	# Paths
-	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')
-	parser.add_argument('--save_at', type=str, default=log_dir + '/PromptTuningMultiModel')
-	parser.add_argument('--load_adapter_from', type=str, default=None)  # Path to dir
-	parser.add_argument('--load_base_from_path', type=str, default=None)
-	
-	# Prompt Tuning Parameters
-	parser.add_argument('--max_prefix_length', type=int, default=0)
-	parser.add_argument('--num_virtual_tokens', type=int, default=10)
-	parser.add_argument('--max_prompt_length', type=int, default=325)  # Max 384
-	parser.add_argument('--max_length', type=int, default=325+256)  # Max 384+512
-	parser.add_argument('--num_libraries', type=int, default=5)
-	
-	# Model
-	parser.add_argument("--model_type", type=str, default=model_type)
-	parser.add_argument("--model_name_or_path", type=str, default=huggingface_path)
-	parser.add_argument("--config_name", type=str, default=huggingface_path)
-	parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
-	
-	# Training
-	parser.add_argument("--num_epochs", type=int, default=20)
-	parser.add_argument("--pre_num_iters", type=int, default=0)
-	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)
-	parser.add_argument("--lr", type=float, default=5e-5)
-	
-	# Others
-	parser.add_argument("--num_test_problems", type=int, default=None, choices=[None, 100])
-	parser.add_argument("--num_train_problems", type=int, default=None, choices=[None, 100])
-	parser.add_argument("--infer_final_responsibilities", type=bool, default=False)
-	
-	# Evaluation
-	parser.add_argument("--save_results_at", type=str, default=os.path.join(log_dir, 'all_codes.json'))
-	parser.add_argument("--num_beams", type=int, default=1)
-	parser.add_argument("--max_new_tokens", type=int, default=256)
-	parser.add_argument("--do_sample", type=bool, default=True)
-	parser.add_argument("--num_return_sequences", type=int, default=5)
-	parser.add_argument("--num_return_sequences_per_iter", type=int, default=5)
-	parser.add_argument("--temperature", type=float, default=0.6)
-	parser.add_argument("--top_p", type=float, default=0.95)
-	
-	# Hardware configuration
-	parser.add_argument("--no_cuda",
-						help="Avoid using CUDA when available")
-	parser.add_argument('--fp16', default=True, action='store_true',
-						help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
-	parser.add_argument("--local_rank", type=int, default=-1,
-						help="For distributed training (multi-node): local_rank")
-	parser.add_argument('--db', default=False,
-						help='set to turn on debug mode i.e. using dummy small data split and only 1 data worker')
-	parser.add_argument("--node_index", type=int, default=-1,
-						help="node index if multi-node running")
-	parser.add_argument("--gpu_per_node", type=int, default=4,
-						help="num of gpus per node")
-	
-	args = parser.parse_args()
-	
-	args.log_dir = log_dir
-	# Update the max_length and max_prompt_length by deducting the number of virtual tokens
-	args.max_length = args.max_length - args.num_virtual_tokens
-	args.max_prompt_length = args.max_prompt_length - args.num_virtual_tokens
-	# Update the number of lib if peft is not used
-	if not args.do_peft:
-		args.num_libraries = 1
-	
-	set_dist(args, logger)
-	set_seed(args)
-	
-	# Log the config
-	config: dict = vars(args)
-	config = {key: str(value) for key, value in config.items()}
-	config = OrderedDict(sorted(config.items()))
-	
-	log_dist(logger, message="\n\n# ############### PEFT ############## #\n\n", level=logging.INFO, ranks=[0])
-	log_dist(logger, message=json.dumps(config, indent=4), level=logging.INFO, ranks=[0])
-	
-	return args, logger
+	save_predictions_mbxp_format(args, oracle_output, lang='python', d_type='MBPP')
 
 
 def main():

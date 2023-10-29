@@ -21,9 +21,10 @@ def get_config():
 	create_dir(log_dir)
 	
 	# Configure logging
-	logging.basicConfig(filename=os.path.join(log_dir, 'logs.txt'), filemode='w',
-						format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
-						datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO)
+	if is_rank_0():
+		logging.basicConfig(filename=os.path.join(log_dir, 'logs.txt'), filemode='w',
+							format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
+							datefmt='%m/%d/%Y %H:%M:%S', level=logging.INFO)
 	logger = logging.getLogger(__name__)
 	
 	# Define the parameters
@@ -32,7 +33,7 @@ def get_config():
 	
 	parser = argparse.ArgumentParser()
 
-	# High-level
+	# ############################################### High-level ################################################# #
 	parser.add_argument('--wandb_logging', type=bool, default=True)
 	parser.add_argument("--wandb_run_name", type=str, default=f'MBPP_{model_type}')
 	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
@@ -57,8 +58,7 @@ def get_config():
 	parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
 	
 	# #################################### Training-Optimizer Configuration #################################### #
-	parser.add_argument("--num_epochs", type=int, default=20)
-	parser.add_argument("--pre_num_iters", type=int, default=0)
+	parser.add_argument("--num_epochs", type=int, default=40)
 	parser.add_argument("--per_gpu_train_batch_size", type=int, default=2)
 	parser.add_argument("--lr", type=float, default=5e-5)
 	parser.add_argument('--gradient_accumulation_steps', type=int, default=8)
@@ -67,14 +67,7 @@ def get_config():
 	parser.add_argument("--lr_scheduler_type", type=str, default='constant_with_warmup',
 						choices=['linear', 'cosine', 'cosine_with_restarts', 'polynomial', 'constant_with_warmup'])
 	
-	# #################################### Evaluator Configuration ############################################# #
-	parser.add_argument("--num_beams", type=int, default=5)
-	parser.add_argument("--max_new_tokens", type=int, default=512)
-	parser.add_argument("--do_sample", type=bool, default=True)
-	parser.add_argument("--num_return_sequences", type=int, default=1)
-	parser.add_argument("--num_return_sequences_per_iter", type=int, default=1)
-	parser.add_argument("--temperature", type=float, default=0.9)
-	parser.add_argument("--top_p", type=float, default=0.95)
+	# #################################### Logging Configuration ############################################# #
 	parser.add_argument("--save_steps", default=0, type=int,
 						help="Save model every n steps (If > 0) if `save_strategy==steps`")
 	parser.add_argument('--save_total_limit', default=2, type=int,
@@ -83,6 +76,7 @@ def get_config():
 						help="Log every X updates steps.")
 
 	# #################################### Hardware Configuration ############################################# #
+	parser.add_argument("--load_in_8bit", type=bool, default=False)
 	parser.add_argument("--no_cuda",
 						help="Avoid using CUDA when available")
 	parser.add_argument('--fp16', default=True, action='store_true',
@@ -98,22 +92,22 @@ def get_config():
 	
 	# ############################################ Others ##################################################### #
 	parser.add_argument("--num_train_problems", type=int, default=None, choices=[None, 100])
-	parser.add_argument("--num_test_problems", type=int, default=None, choices=[None, 100])
 	
 	args = parser.parse_args()
 	
 	# Create Directories
 	create_dir(args.save_at)
 	
-	set_dist(args, logger)
+	set_dist(args)
 	set_seed(args)
 	
+	# Log the config
 	config: dict = vars(args)
 	config = {key: str(value) for key, value in config.items()}
 	config = OrderedDict(sorted(config.items()))
 	
-	log_dist(logger, message="\n\n# ############### Tune Baseline ############## #\n\n", level=logging.INFO, ranks=[0])
-	log_dist(logger, message=json.dumps(config, indent=4), level=logging.INFO, ranks=[0])
+	log_dist(message="\n\n# ############### Tune Baseline ############## #\n\n", level=logging.INFO, ranks=[0])
+	log_dist(message=json.dumps(config, indent=4), level=logging.INFO, ranks=[0])
 	
 	return args, logger
 
@@ -138,7 +132,8 @@ def learn(args, logger):
 	_, model = load_base_model(
 		model_type=args.model_type,
 		config_name=args.config_name,
-		model_path=args.model_name_or_path
+		model_path=args.model_name_or_path,
+		load_in_8bit=args.load_in_8bit
 	)
 	
 	# # Load Checkpoint ########################################################
@@ -215,7 +210,6 @@ def learn(args, logger):
 	
 	# Save the model [My way]
 	log_dist(
-		logger,
 		message="Saving model at {}".format(args.save_at),
 		level=logging.INFO,
 		ranks=[0]
