@@ -1,222 +1,215 @@
-"""
-Run solutions from one problem.
-"""
-import argparse
 import json
-import numpy as np
-import os
-import pprint
-import multiprocessing
-import utils.apps_testing as test_util
+from collections import OrderedDict
+from typing import Dict, List
 
-# for timing debugging
-from datetime import datetime, date
+import torch
 from tqdm import tqdm
 
-from types import SimpleNamespace
-from typing import Dict
-
-EXAMPLE_RESULTS = {"0": [[-2]], "1": [[False, False, False]], "2": [[True, True]], "3": [
-	[False, True, False, True, False, False, False, True, False, True, False, True, True, True, False, True]],
-				   "4": [[-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]]}
-EXAMPLE_ARGS = SimpleNamespace(debug=True)
-TIMEOUT = 10
+from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftMultiModel
+from utils.model import get_response_log_probs
+from utils.custom import save_best_lib_predictions_mbxp_format, save_predictions_mbxp_format
+from utils.config import get_config
+from utils.data import MBPP_Dataset as CustomDataset
+from utils.xformer import load_tokenizer, load_base_model
 
 
-def print_results(results: Dict, args: argparse.Namespace = None):
-	"""
-	Given the results evaluated against the testcases we output some statistics.
-
-	>>> print_results(EXAMPLE_RESULTS, EXAMPLE_ARGS)
-	number of compile errors = 1 avg = 0.2
-	number of runtime errors = 1 avg = 0.2
-	number of test cases run = 5
-	Test Case Average (average accuracy over problems) = 0.3
-	Strict Accuracy (all test cases passed / total problems) = 0.2
-	"""
-	res = []
-	per_prob_res = []
-	all_correct = []
-	for index in results:
-		problem_results = np.asarray(results[index])
-		res.extend(problem_results)
-		per_prob_res.append(np.mean(problem_results > 0))
-		all_correct.append(np.all(problem_results > 0))
+@torch.no_grad()
+def evaluate(args, logger):
+	# Get the tokenizer
+	tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
 	
-	# We count both compile errors and runtime errors for multiple tests as one error.
-	compile_errors = len([e for e in res if -2 in e])
-	runtime_errors = len([e for e in res if -1 in e])
-	total_testcases = len(res)
-	if args and args.debug:
-		print(f"number of compile errors = {compile_errors} avg = {compile_errors / total_testcases}")
-		print(f"number of runtime errors = {runtime_errors} avg = {runtime_errors / total_testcases}")
-		print(f"number of test cases run = {total_testcases}")
+	# Get the config
+	peft_config = PromptTuningConfig(
+		task_type=TaskType.MULTI_CAUSAL_LM,  # CAUSAL_LM, SEQ_2_SEQ_LM for Dec-only, Enc-Dec. MULTI is my custom field.
+		prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
+		num_virtual_tokens=args.num_virtual_tokens,
+		# prompt_tuning_init_text="Classify if tweet is a complaint or not:",  # Use this if prompt_tuning_init is TEXT
+		# tokenizer_name_or_path=args.model_name_or_path,  # Use this if prompt_tuning_init is TEXT
+		num_init_clusters=args.num_libraries,  # My custom field
+	)
 	
-	print(f"Test Case Average (average accuracy over problems) = {np.mean(per_prob_res)}")
-	print(f"Strict Accuracy (all test cases passed / total problems) = {np.mean(all_correct)}")
-
-
-def check_correctness(prob_path, generation, timeout, debug):
-	"""Check correctness of code generation with a global timeout.
-	The global timeout is to catch some extreme/rare cases not handled by the timeouts
-	inside `run_test`"""
+	# Get the dataset
+	dataset = CustomDataset(
+		path_to_data=args.path_to_data,
+		tokenizer=tokenizer,
+		max_prompt_length=args.max_prompt_length,
+		max_length=args.max_length,
+		sample_problems=args.num_test_problems,
+		mode='test'
+	)
 	
-	def _temp_run(prob_path, generation, debug, result):
-		result.append(test_util.run_test(prob_path=prob_path, test=generation, debug=debug))
+	# Get the model
+	_, model = load_base_model(
+		model_type=args.model_type,
+		config_name=args.config_name,
+		model_path=args.model_name_or_path,
+		load_in_8bit=args.load_in_8bit
+	)
 	
-	manager = multiprocessing.Manager()
-	result = manager.list()
-	p = multiprocessing.Process(target=_temp_run, args=(prob_path, generation, debug, result))
-	p.start()
-	p.join(timeout=timeout + 1)
-	if p.is_alive():
-		p.kill()
-	if not result:
-		# Reamark: ideally we would consider that all tests failed but we can't access number of tests here easily
-		# so we use 21=the average number of tests for a smaple in the test split instead
-		avg_number_tests = 21
-		result = [[-1] * avg_number_tests]
-		if debug:
-			print(f"global timeout")
-	return result[0]
-
-
-def eval_and_save_problems(args):
-	with open(args.test_loc, "r") as f:
-		problems = sorted(json.load(f))
-	
-	print(len(problems))
-	results = {}
-	codes_loc = os.path.join(args.save, f"all_codes.json")
-	if not os.path.exists(codes_loc):
-		codes_loc = os.path.join(args.save, f"{args.start}-{args.end}_codes.json")
-	
-	if os.path.exists(codes_loc):
-		results_loc = os.path.join(args.save, f"all_results.json")
-	else:
-		results_loc = os.path.join(args.save, f"{args.start}-{args.end}_results.json")
-	print(codes_loc, results_loc)
-	
-	with open(codes_loc, "r") as f:
-		gpt_codes = json.load(f)
-	
-	if args.index:
-		problems = [problems[args.index]]
-	else:
-		if args.start > len(problems) or args.start < 0:
-			print(f"start index {args.start} > number of problems {len(problems)}")
-			return
-		start = args.start
-		if args.end is None or args.end > len(problems):
-			end = len(problems)
-		else:
-			end = args.end
-		problems = problems[start:end]
-	
-	if args.stop_early:
-		problems = problems[:args.stop_early]
-	
-	# main eval loop
-	for index, problem in enumerate(tqdm(problems)):
-		try:
-			if args.debug:
-				print(f"\n\nproblem path = {problem}")
-			output_str = gpt_codes[str(index + args.start)]
-		except:
-			print("CANNOT FIND OUTPUT_STR FOR", problem)
-			continue
-		prob_path = os.path.join(args.root, problem)
+	# Load checkpoint
+	if args.load_base_from_path is not None:
+		# We load the model state dict on the CPU to avoid an OOM error.
+		loaded_state_dict = torch.load(args.load_base_from_path, map_location="cpu")
+		loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
+		model.load_state_dict(loaded_state_dict, strict=True)
 		
-		with open(os.path.join(prob_path, "solutions.json"), "r") as f:
-			sols = json.load(f)
+		# release memory
+		del loaded_state_dict
 		
-		if not os.path.exists(args.save):
-			os.makedirs(args.save)
+		# Log the loaded checkpoint
+		message = "Loaded model checkpoint from path: {}".format(args.load_base_from_path)
+		logger.info(message)
+		print(message)
+	
+	# Update the model's padding token id for open-ended generation
+	if 't5' not in args.model_type and model.config.pad_token_id is None:
+		model.config.pad_token_id = tokenizer.pad_token_id
+	
+	if args.do_peft:
 		
-		res = []
-		for o_idx, o in enumerate(output_str):
-			if args.debug:
-				print(f"\nTesting solution {o_idx}")
-			curr_res = [-2]
+		if args.load_adapter_from is None:
+			logger.error("Please specify the path to load the model adapters from")
+			raise ValueError("Please specify the path to load the model adapters from")
+		
+		# Load the model adapters - in place
+		model = PeftMultiModel.from_pretrained(
+			model=model,
+			model_id=args.load_adapter_from,  # Must be a directory containing the model files
+			config=peft_config,
+		)
+		msg = "Loaded the model adapters from: {}".format(args.load_adapter_from)
+		logger.info(msg)
+		print(msg)
+	
+	# GPU-ize the model
+	model.to(args.device)
+	
+	# Predict for each sample output by each library
+	num_loops = int(args.num_return_sequences / args.num_return_sequences_per_iter)
+	
+	oracle_output: Dict[str, Dict[str, List[str]]] = {}
+	lib_mapping:  Dict[str, int] = {}
+	
+	model.eval()
+	
+	for index in tqdm(range(len(dataset)), desc="Predicting", position=0, leave=True):
+		sample = dataset.sample(index)
+		sample = tuple(tensor.unsqueeze(0).to(args.device) for tensor in sample)
+		input_ids, attention_mask = sample
+		
+		# ############################## Add logic for identifying the library index ############################## #
+		chosen_lib_idx = None
+		if args.do_peft:
+			chosen_lib_idx = get_library_index(args, input_ids, attention_mask, tokenizer, model)
+			
+		
+		all_library_predictions: Dict[str, List[str]] = OrderedDict()
+		for k in range(args.num_libraries):
+			
+			# Set the library index
+			if args.do_peft:
+				model.library_idx = k
+			
+			all_responses: List[str] = []
 			try:
-				curr_res = check_correctness(prob_path=prob_path, generation=o, timeout=TIMEOUT, debug=args.debug)
-				fixed = []
-				for e in curr_res:
-					if isinstance(e, np.ndarray):
-						e = e.item(0)
-					if isinstance(e, np.bool_):
-						e = bool(e)
-					fixed.append(e)
-				curr_res = fixed
-				if not np.all(curr_res):
-					print(f"Results were not all True: {curr_res}")
+				
+				for _ in tqdm(range(num_loops), ncols=0, total=num_loops, leave=False):
+					top_responses = model.generate(
+						input_ids=input_ids,
+						attention_mask=attention_mask,
+						max_new_tokens=args.max_new_tokens,
+						do_sample=args.do_sample,
+						num_beams=args.num_beams,
+						early_stopping=True if args.num_beams > 1 and not args.do_sample else False,
+						temperature=args.temperature if args.do_sample else 1.0,
+						top_p=args.top_p if args.do_sample else 1.0,
+						num_return_sequences=args.num_return_sequences_per_iter,
+					)
+				
+					top_responses = top_responses.detach().cpu().numpy().tolist()
+					top_responses = [resp[sample[0].shape[1]:] for resp in top_responses]
+					top_responses = [tokenizer.decode(resp, skip_special_tokens=False) for resp in top_responses]
+					# Split the response at the first occurrence of the end of text token.
+					# This works since we append the eos token to responses and make the model predict it
+					# Also useful to not consider any text after the first occurrence of the eos token
+					top_responses = [resp.split(tokenizer.eos_token)[0] for resp in top_responses]
+					all_responses.extend(top_responses)
+					
 			except Exception as e:
-				print(f"test framework exception = {repr(e)}{e}\n")
-				break
-			finally:
-				assert isinstance(curr_res, list)
-				res.append(curr_res)
+				if isinstance(e, UnboundLocalError) and str(
+						e) == "local variable 'next_tokens' referenced before assignment":
+					# See https://github.com/huggingface/transformers/issues/5118
+					logger.exception("Problem text was > specified tokens, so cannot do generation")
+					logger.info(e)
+					raise e
+				else:
+					logger.exception("Unexpected exception in generating solution")
+					logger.info(e)
+					raise e
+				
+				# # Default to empty string on errors
+				# prediction = ""
+
+			# # For APPS
+			# if len(prediction):
+			# 	prediction = prediction.split("ANSWER:\n")[1].replace("<|endoftext|>", "")
+			
+			all_library_predictions[f'lib_{k}'] = all_responses
+			
+		oracle_output[dataset.ids[index]] = all_library_predictions
 		
-		if args.debug:
-			print(f"\nHow to read results "
-				  f"[-2] = compile error, "
-				  f"[-1] = runtime error "
-				  f"[False] = failed test case "
-				  f"[True] = passed test case")
-		# print(f"results = {res}")
+		if chosen_lib_idx is not None:
+			lib_mapping[dataset.ids[index]] = int(chosen_lib_idx)
+			
+	# Save the output
+	# print(json.dumps(output, indent=4))
+	with open(args.save_results_at, 'w') as f:
+		json.dump(oracle_output, f, indent=4)
+	
+	# Save the output for the best chosen libraries
+	if lib_mapping:
+		save_best_lib_predictions_mbxp_format(args, oracle_output, lib_mapping, lang='python', d_type='MBPP')
+	
+	save_predictions_mbxp_format(args, oracle_output, lang='python', d_type='MBPP')
+
+
+@torch.no_grad()
+def get_library_index(args, prompt, prompt_mask, tokenizer, model):
+	"""
+	:param args:
+	:param prompt: (batch_size, seq_len)
+	:param prompt_mask: (batch_size, seq_len)
+	:param tokenizer:
+	:param model:
+	:return: library_idx: int
+	"""
+	
+	max_likelihood = -float('inf')
+	library_idx = None
+	
+	# Copy the prompt into the response tensor
+	response = prompt.clone()
+	response[response == tokenizer.pad_token_id] = -100  # Replace pad_token_id with labels [=-100]
+	response_mask = response.ne(-100)
+	
+	for k in range(args.num_libraries):
 		
-		results[index + args.start + args.index] = res
+		# Likelihood of the prompt coming from the latent prompt of library k
+		prompt_log_prob = get_response_log_probs(args, (prompt, prompt_mask, response, response_mask), tokenizer, model, k)
 		
-		with open(results_loc, "w") as f:
-			try:
-				f.write(json.dumps(results))
-			except Exception as e:
-				import pdb;
-				pdb.set_trace()
-				print("didn't save problem due to {e}")
-	
-	return results
+		# Update the library index
+		if prompt_log_prob > max_likelihood:
+			max_likelihood = prompt_log_prob
+			library_idx = k
+			
+	return library_idx
 
 
-def main(args):
-	argsdict = vars(args)
-	print(pprint.pformat(argsdict))
-	
-	if args.print_results:
-		results = {}
-		codes_loc = os.path.join(args.save, f"all_codes.json")
-		if os.path.exists(codes_loc):
-			results_loc = os.path.join(args.save, f"all_results.json")
-		else:
-			results_loc = os.path.join(args.save, f"{args.start}-{args.end}_results.json")
-		with open(results_loc, "r") as f:
-			results = json.load(f)
-	else:
-		results = eval_and_save_problems(args)
-	
-	print_results(results, args)
+def main():
+	args, logger = get_config()
+	evaluate(args, logger)
 
 
-if __name__ == "__main__":
-	import doctest
+if __name__ == '__main__':
+	main()
 	
-	doctest.testmod()
-	
-	parser = argparse.ArgumentParser(description="Testing a Language Model on Python Code")
-	
-	parser.add_argument("-t", "--test_loc", default="../data_split/test.json", type=str,
-						help="path to the json containing problem paths to be evaluated.")
-	parser.add_argument("-r", "--root", default="../", type=str, help="where the data is stored.")
-	parser.add_argument("-s", "--start", default=0, type=int)
-	parser.add_argument("-e", "--end", default=None, type=int)
-	parser.add_argument("-i", "--index", default=0, type=int)
-	parser.add_argument("-p", "--print_results", action="store_true",
-						help="If you have already evaluated the results and only want to print them.")
-	parser.add_argument("-d", "--debug", action="store_true")
-	parser.add_argument("--save", type=str, default="./results",
-						help="Where the evaluated data is loaded from and results saved to.")
-	parser.add_argument("--stop-early", default=None, type=int)
-	
-	_args = parser.parse_args()
-	
-	main(_args)

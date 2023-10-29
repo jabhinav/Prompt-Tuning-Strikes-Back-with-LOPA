@@ -6,3 +6,6 @@ wandb>=0.15.11
 accelerate>=0.23.0
 huggingface_hub>=0.15.1
 safetensors==0.3.3
+psutil>=5.9.5
+tensorboardx>=2.6.2.2
+peft>=0.5.0

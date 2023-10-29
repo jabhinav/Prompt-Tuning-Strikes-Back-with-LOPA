@@ -1,98 +1,15 @@
-import argparse
-import json
-import os
-from collections import OrderedDict
-from datetime import datetime
-
 import torch
-import torch.nn.functional as F
 import wandb
-import sys
 from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
 from transformers import get_constant_schedule_with_warmup
 from transformers.modeling_utils import unwrap_model
 
-import logging
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType
 from utils.config import get_config
-from utils.custom import create_dir, set_dist, set_seed, log_dist, debug_memory
 from utils.data import MBPP_Dataset as CustomDataset
-from utils.model import load_tokenizer, load_base_model, get_huggingface_path
-
-
-def logprobs_from_logits(logits, labels):
-	"""
-	See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
-	"""
-	log_p = F.log_softmax(logits, dim=2)
-	logpy = torch.gather(log_p, 2, labels.unsqueeze(2)).squeeze(-1)
-	return logpy
-
-
-def compute_grad_norm(model):
-	total_norm = 0
-	for p in model.parameters():
-		if p.grad is not None and p.requires_grad:
-			param_norm = p.grad.data.norm(2)
-			total_norm += param_norm.item() ** 2
-	total_norm = total_norm ** (1. / 2)
-	return total_norm
-
-
-def get_response_log_probs(args, batch, tokenizer, model, library_idx):
-	prompt, prompt_mask, response, response_mask = batch
-	batch_size = prompt.size(0)
-	
-	resp_logits = model(
-		input_ids=prompt, attention_mask=prompt_mask,
-		labels=response, output_hidden_states=True, library_idx=library_idx
-	)['logits']
-	
-	# # Append labels [=-100] for the latent prompt to the response
-	prefix = torch.full((batch_size, args.num_virtual_tokens), -100).to(response.device)
-	response = torch.cat((prefix, response), dim=1)
-	# # Append response_mask with 0s for the latent prompt (not the mask for attending to latent prompt)
-	prefix_resp_mask = torch.zeros((batch_size, args.num_virtual_tokens)).to(response_mask.device)
-	response_mask = torch.cat((prefix_resp_mask, response_mask), dim=1)
-	
-	response[response == -100] = tokenizer.pad_token_id  # Replace -100 with pad_token_id
-	resp_labels = response.contiguous()
-	
-	resp_log_prob = logprobs_from_logits(resp_logits, resp_labels)
-	resp_log_prob = resp_log_prob * response_mask
-	
-	# Likelihood of the sample coming from the latent prompt of library k
-	resp_log_prob = resp_log_prob.sum(dim=1)
-	
-	return resp_log_prob
-
-
-@torch.no_grad()
-def compute_responsibilities(args, batch, tokenizer, model) -> torch.Tensor:
-	"""
-	Compute the responsibilities i.e. posterior probabilities of the sample coming from the latent prompt of each
-	library.
-	:param args:
-	:param batch:
-	:param tokenizer:
-	:param model:
-	:return:
-	"""
-	
-	batch_size = batch[0].size(0)
-	
-	# Create a tensor of shape (n_samples, num_libraries) to store the responsibilities
-	likelihood = torch.zeros((batch_size, args.num_libraries)).to(args.device)
-	
-	for k in range(args.num_libraries):
-		# Store the likelihood of the sample coming from the latent prompt of library k
-		likelihood[:, k] = get_response_log_probs(args, batch, tokenizer, model, k)
-	
-	# Normalize the responsibilities (prior can be uniform, thus cancelled out)
-	responsibilities = F.softmax(likelihood, dim=1)
-	
-	return responsibilities.detach()
+from utils.xformer import load_tokenizer, load_base_model
+from utils.model import get_response_log_probs, compute_responsibilities
 
 
 def learn(args, logger):
@@ -164,14 +81,14 @@ def learn(args, logger):
 	model.to(args.device)
 	if args.n_gpu > 1:
 		model = torch.nn.DataParallel(model)
-		
+	
 	# Get the optimizer
 	optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 	lr_scheduler = get_constant_schedule_with_warmup(
 		optimizer=optimizer,
 		num_warmup_steps=0,
 	)
-
+	
 	logger.info("Starting EM for Library Learning")
 	
 	# # Debug Load the model
@@ -282,8 +199,8 @@ def learn(args, logger):
 		responsibilities = compute_responsibilities(args, batch, tokenizer, model)
 		# Debug by showing the responsibilities of each sample
 		logger.info(f"[Responsibilities] {dataset.ids[i]}: {responsibilities.cpu().numpy()[0].tolist()}")
-		
-		
+
+
 def main():
 	args, logger = get_config()
 	learn(args, logger)

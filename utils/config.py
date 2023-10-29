@@ -6,7 +6,7 @@ from collections import OrderedDict
 from datetime import datetime
 
 from utils.custom import create_dir, is_rank_0, set_dist, set_seed, log_dist
-from utils.model import get_huggingface_path
+from utils.xformer import get_huggingface_path
 
 
 def get_config():
@@ -37,15 +37,15 @@ def get_config():
 	# Paths
 	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')
 	parser.add_argument('--save_at', type=str, default=log_dir + '/PromptTuningMultiModel')
-	parser.add_argument('--load_adapter_from', type=str, default='logging/PromptTuningMultiModel')  # Path to dir
-	parser.add_argument('--load_base_from_path', type=str, default='logging/pytorch_model.bin')
+	parser.add_argument('--load_adapter_from', type=str, default='logging/debugging/PromptTuningMultiModel')  # Path to dir
+	parser.add_argument('--load_base_from_path', type=str, default='logging/debugging/pytorch_model.bin')
 	
 	# Prompt Tuning Parameters
-	parser.add_argument('--max_prefix_length', type=int, default=0)
+	parser.add_argument('--num_libraries', type=int, default=5)
 	parser.add_argument('--num_virtual_tokens', type=int, default=10)
 	parser.add_argument('--max_prompt_length', type=int, default=325)  # Max 384
 	parser.add_argument('--max_length', type=int, default=325+256)  # Max 384+512
-	parser.add_argument('--num_libraries', type=int, default=5)
+	parser.add_argument("--max_new_tokens", type=int, default=256)
 	
 	# Model
 	parser.add_argument("--model_type", type=str, default=model_type)
@@ -67,10 +67,9 @@ def get_config():
 	# Evaluation
 	parser.add_argument("--save_results_at", type=str, default=os.path.join(log_dir, 'all_codes.json'))
 	parser.add_argument("--num_beams", type=int, default=1)
-	parser.add_argument("--max_new_tokens", type=int, default=256)
 	parser.add_argument("--do_sample", type=bool, default=True)
-	parser.add_argument("--num_return_sequences", type=int, default=5)
-	parser.add_argument("--num_return_sequences_per_iter", type=int, default=5)
+	parser.add_argument("--num_return_sequences", type=int, default=1)
+	parser.add_argument("--num_return_sequences_per_iter", type=int, default=1)
 	parser.add_argument("--temperature", type=float, default=0.6)
 	parser.add_argument("--top_p", type=float, default=0.95)
 	

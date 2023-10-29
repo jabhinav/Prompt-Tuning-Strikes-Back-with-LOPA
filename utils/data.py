@@ -91,29 +91,29 @@ class LibraryBaseDataset(Dataset):
 		raise NotImplementedError
 	
 	def sample(self, idx: int):
+		
+		src_input_ids, trg_label_ids = [], []
 		q_str, a_str = self.data[self.ids[idx]]
 		question_token_ids = self.tokenizer.encode(q_str, verbose=False)
 		question_token_ids = question_token_ids[-self.max_prompt_length:]  # Truncate the prompt from left
+		src_input_ids.extend(question_token_ids)
 		
 		if self.mode == 'test':
-			# Pad from left
-			if len(question_token_ids) < self.max_prompt_length:
+			
+			# Pad from left: Allows batched generation
+			if len(src_input_ids) < self.max_prompt_length:
 				new_input_ids = [self.tokenizer.eos_token_id] * self.max_prompt_length
-				new_input_ids[-len(question_token_ids):] = question_token_ids
-				question_token_ids = new_input_ids
+				new_input_ids[-len(src_input_ids):] = src_input_ids
+				src_input_ids = new_input_ids
 				
-			# No need to pad for test and add the solution
-			question_token_ids = torch.LongTensor(question_token_ids)
-			mask = question_token_ids.ne(self.tokenizer.eos_token_id)
-			return question_token_ids, mask
+			src_input_ids = torch.LongTensor(src_input_ids)
+			mask = src_input_ids.ne(self.tokenizer.eos_token_id)
+			return src_input_ids, mask
 		
 		else:
 			answer_token_ids = self.tokenizer.encode(a_str, verbose=False)
 			answer_token_ids.append(self.tokenizer.eos_token_id)
 			
-			src_input_ids = []
-			trg_label_ids = []
-			src_input_ids.extend(question_token_ids)
 			src_input_ids.extend(answer_token_ids)
 			trg_label_ids.extend([-100] * len(question_token_ids))
 			trg_label_ids.extend(answer_token_ids)

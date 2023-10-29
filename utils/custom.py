@@ -2,16 +2,14 @@ import gc
 import json
 import logging
 import multiprocessing
-import os
 import pathlib
-import GPUtil
 import random
 from typing import List, Dict
-from pynvml import *
 
+import GPUtil
 import numpy as np
 import torch
-import logging
+from pynvml import *
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +38,7 @@ class TorchTracemalloc:
 		self.peak = torch.cuda.max_memory_allocated()
 		self.used = b2mb(self.end - self.begin)
 		self.peaked = b2mb(self.peak - self.begin)
-		# print(f"delta used/peak {self.used:4d}/{self.peaked:4d}")
+	# print(f"delta used/peak {self.used:4d}/{self.peaked:4d}")
 
 
 def debug_memory(msg: str = "", device=0, accelerator=None):
@@ -96,7 +94,6 @@ def create_dir(path: str):
 
 
 def set_dist(args):
-	
 	# To train on cpu, set args.no_cuda=True else it will use all available gpus [Recommended use for now]
 	if args.local_rank == -1 or args.no_cuda:
 		device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -153,28 +150,28 @@ def save_predictions_mbxp_format(
 			for problem in output:
 				for response in output[problem][f'lib_{k}']:
 					result_dict: dict = {
-						"task_id":  problem,
+						"task_id": problem,
 						"language": lang,
 						"completion": response,
 						"data_type": d_type
 					}
 					file.write(json.dumps(result_dict) + '\n')
-					
-		logger.info(f"Saved predictions for library {k} in the format required by the MBXP evaluation script")
 		
+		logger.info(f"Saved predictions for library {k} in the format required by the MBXP evaluation script")
+	
 	# Flatten all the predictions in a single file
 	with open(os.path.join(args.log_dir, f'mbxp_solutions.json'), 'w') as file:
 		for problem in output:
 			for k in range(args.num_libraries):
 				for response in output[problem][f'lib_{k}']:
 					result_dict: dict = {
-						"task_id":  problem,
+						"task_id": problem,
 						"language": lang,
 						"completion": response,
 						"data_type": d_type
 					}
 					file.write(json.dumps(result_dict) + '\n')
-					
+	
 	logger.info(f"Saved all predictions in a single file in the format required by the MBXP evaluation script")
 
 
