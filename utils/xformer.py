@@ -110,7 +110,7 @@ def load_tokenizer(model_type, tokenizer_name):
 	return tokenizer
 
 
-def load_base_model(model_type, config_name=None, model_path=None, load_in_8bit: bool = False):
+def load_base_model(model_type, config_name, model_path, load_in_8bit: bool = False):
 	config_class, model_class = MODEL_CLASSES[model_type]
 	
 	config = config_class.from_pretrained(

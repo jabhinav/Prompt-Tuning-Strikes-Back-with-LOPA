@@ -23,22 +23,23 @@ def get_config():
 	logger = logging.getLogger(__name__)
 	
 	# Define the parameters
-	model_type = "codegen-350M"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
+	model_type = "codegen2-1B"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
 	huggingface_path = get_huggingface_path(model_type)
 	
 	parser = argparse.ArgumentParser()
 	
 	# High-level
-	parser.add_argument('--wandb_logging', type=bool, default=False)
+	parser.add_argument('--wandb_logging', type=bool, default=True)
 	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
 	parser.add_argument('--do_peft', type=bool, default=True)
-	parser.add_argument('--seed', type=int, default=1234, help="random seed for initialization")
+	parser.add_argument('--seed', type=int, default=5995, help="random seed for initialization")
 	
 	# Paths
 	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')
 	parser.add_argument('--save_at', type=str, default=log_dir + '/PromptTuningMultiModel')
-	parser.add_argument('--load_adapter_from', type=str, default='logging/debugging/PromptTuningMultiModel')  # Path to dir
-	parser.add_argument('--load_base_from_path', type=str, default='logging/debugging/pytorch_model.bin')
+	parser.add_argument('--load_adapter_from', type=str, default=None)  # Path to dir
+	parser.add_argument('--load_base_from_path', type=str, default=None)
+	parser.add_argument('--clf_predictor_path', type=str, default=None)
 	
 	# Prompt Tuning Parameters
 	parser.add_argument('--num_libraries', type=int, default=5)
@@ -54,10 +55,14 @@ def get_config():
 	parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
 	
 	# Training
-	parser.add_argument("--num_epochs", type=int, default=20)
-	parser.add_argument("--pre_num_iters", type=int, default=0)
+	parser.add_argument("--num_epochs", type=int, default=5)
+	parser.add_argument("--pre_num_iters", type=int, default=200)
+	parser.add_argument("--max_m_steps", type=int, default=1)
 	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)
 	parser.add_argument("--lr", type=float, default=5e-5)
+	parser.add_argument("--init_lr", type=float, default=5e-4)
+	parser.add_argument("--prior_lr", type=float, default=1e-5)
+	parser.add_argument("--ent_coeff", type=float, default=0.0)
 	
 	# Others
 	parser.add_argument("--num_test_problems", type=int, default=None, choices=[None, 100])

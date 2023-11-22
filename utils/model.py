@@ -1,5 +1,83 @@
+from typing import Tuple
+
 import torch
 from torch.nn import functional as F
+
+from utils.xformer import load_base_model
+
+
+class ClarificationMLPPredictor(torch.nn.Module):
+	def __init__(self, input_dim: int, output_dim: int):
+		super(ClarificationMLPPredictor, self).__init__()
+		self.input_dim = input_dim
+		self.output_dim = output_dim
+		self.fc1 = torch.nn.Linear(self.input_dim, 1024)
+		self.fc2 = torch.nn.Linear(1024, 512)
+		self.fc3 = torch.nn.Linear(512, 256)
+		self.fc4 = torch.nn.Linear(256, self.output_dim)
+	
+	def forward(self, prompt_embedding: torch.Tensor) -> torch.Tensor:
+		"""
+		:param prompt_embedding: Tensor of shape (batch_size, input_dim)
+		:return: Tensor of shape (batch_size, output_dim)
+		"""
+		x = torch.nn.functional.relu(self.fc1(prompt_embedding))
+		x = torch.nn.functional.relu(self.fc2(x))
+		x = torch.nn.functional.relu(self.fc3(x))
+		x = self.fc4(x)  # Logits
+		x = torch.nn.functional.softmax(x, dim=1)  # Probabilities
+		return x
+	
+	def predict(self, prompt_embedding: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+		"""
+		:param prompt_embedding: Tensor of shape (batch_size, input_dim)
+		:return: Tuple of (probabilities, indices)
+		"""
+		probabilities = self.forward(prompt_embedding)
+		indices = torch.argmax(probabilities, dim=1)
+		return probabilities, indices
+
+
+class ClarificationCodeBERTPredictor(torch.nn.Module):
+	def __init__(self, args, output_dim):
+		super(ClarificationCodeBERTPredictor, self).__init__()
+		
+		config, base = load_base_model(
+			model_type=args.bert_model_type,
+			config_name=args.bert_config_name,
+			model_path=args.bert_model_name_or_path,
+		)
+		self.config = config
+		self.base = base  # CodeBERT model
+		
+		# Classifier head
+		self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+		self.dense = torch.nn.Linear(config.hidden_size, config.hidden_size)
+		self.out_proj = torch.nn.Linear(config.hidden_size, output_dim)
+		self.init_predictor_head()
+	
+	def init_predictor_head(self):
+		# Initialize the weights
+		self.dense.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+		self.out_proj.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+		self.out_proj.bias.data.zero_()
+	
+	def forward(self, input_ids, attention_mask):
+		x = self.base(input_ids, attention_mask=attention_mask)
+		x = x[0][:, 0, :]  # Get the CLS token embedding
+		# x = x.pooler_output  # Get the pooled output
+		x = self.dropout(x)
+		x = self.dense(x)
+		x = torch.nn.functional.tanh(x)
+		x = self.dropout(x)
+		x = self.out_proj(x)
+		x = torch.nn.functional.softmax(x, dim=-1)
+		return x
+	
+	def predict(self, input_ids, attention_mask):
+		probabilities = self.forward(input_ids, attention_mask)
+		indices = torch.argmax(probabilities, dim=1)
+		return probabilities, indices
 
 
 def logprobs_from_logits(logits, labels):
@@ -51,37 +129,82 @@ def get_response_log_probs(args, batch, tokenizer, model, library_idx):
 
 
 @torch.no_grad()
-def compute_responsibilities(args, batch, tokenizer, model) -> torch.Tensor:
+def compute_responsibilities(args, batch, tokenizer, model, prior: ClarificationCodeBERTPredictor = None) -> torch.Tensor:
 	"""
 	Compute the responsibilities i.e. posterior probabilities of the sample coming from the latent prompt of each
 	library.
 	:param args:
-	:param batch:
+	:param batch: (prompt_embed, prompt, prompt_mask, response, response_mask)
 	:param tokenizer:
 	:param model:
+	:param prior:
 	:return:
 	"""
 	
 	batch_size = batch[0].size(0)
+	if len(batch) == 6:
+		bert_prompt, bert_prompt_mask, prompt, prompt_mask, response, response_mask = batch
+	else:
+		prompt, prompt_mask, response, response_mask = batch
+		bert_prompt, bert_prompt_mask = None, None
 	
 	# Create a tensor of shape (n_samples, num_libraries) to store the responsibilities
 	likelihood = torch.zeros((batch_size, args.num_libraries)).to(args.device)
 	
 	for k in range(args.num_libraries):
 		# Store the likelihood of the sample coming from the latent prompt of library k
-		likelihood[:, k] = get_response_log_probs(args, batch, tokenizer, model, k)
+		likelihood[:, k] = get_response_log_probs(
+			args,
+			(prompt, prompt_mask, response, response_mask),
+			tokenizer,
+			model,
+			k
+		)
 	
-	# Normalize the responsibilities (prior can be uniform, thus cancelled out)
-	responsibilities = F.softmax(likelihood, dim=1)
+	if prior is None:
+		# Compute the responsibilities (prior is uniform, thus cancelled out)
+		responsibilities = F.softmax(likelihood, dim=1)
+	else:
+		# Compute the prior probabilities
+		clf_preds = prior(bert_prompt, bert_prompt_mask)
+		log_prior = torch.log(clf_preds + 1e-8)
+		log_prior = log_prior.to(args.device)
+		
+		# Add the log_prior to the likelihood
+		full_likelihood = likelihood + log_prior
+		
+		# Compute the responsibilities
+		responsibilities = F.softmax(full_likelihood, dim=1)
 	
-	return responsibilities.detach()
+	# To prevent underflow, clip the responsibilities to a minimum value
+	responsibilities = responsibilities.clamp(min=1e-8)
+	
+	responsibilities = responsibilities.detach()
+	
+	responsibilities.to(args.device)
+	return responsibilities
 
 
 def compute_grad_norm(model):
-	total_norm = 0
-	for p in model.parameters():
+	total_norm: float = 0.
+	for name, p in model.named_parameters():
 		if p.grad is not None and p.requires_grad:
 			param_norm = p.grad.data.norm(2)
 			total_norm += param_norm.item() ** 2
 	total_norm = total_norm ** (1. / 2)
 	return total_norm
+
+
+def get_response_embedding(model, prompt, prompt_mask, response):
+	# Do forward pass and get the response embedding corresponding to the last layer and last token
+	resp_embeddings = model(
+		input_ids=prompt,
+		attention_mask=prompt_mask,
+		labels=response,
+		output_hidden_states=True
+	)['hidden_states'][-1]
+	
+	# Last token embedding
+	resp_embedding = resp_embeddings[:, -1, :]
+	
+	return resp_embedding

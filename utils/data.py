@@ -2,6 +2,7 @@ import glob
 import json
 import os
 import random
+import logging
 from typing import List, Dict, Any, Union
 
 import torch
@@ -9,6 +10,10 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from utils.reindent import reindent_code
+from utils.xformer import load_tokenizer, get_huggingface_path
+
+
+logger = logging.getLogger(__name__)
 
 
 def generate_apps_prompt(problem, tokenizer=None, peek_frac=0.0):
@@ -74,8 +79,7 @@ def generate_apps_prompt(problem, tokenizer=None, peek_frac=0.0):
 
 
 class LibraryBaseDataset(Dataset):
-	def __init__(self, path_to_data: str, tokenizer, max_prompt_length, max_length, mode: str = 'train',
-				 return_dict: bool = False):
+	def __init__(self, path_to_data: str, tokenizer, max_prompt_length, max_length, mode: str, return_dict: bool = False):
 		self.path_to_data = path_to_data
 		self.tokenizer = tokenizer
 		self.max_prompt_length = max_prompt_length
@@ -116,6 +120,7 @@ class LibraryBaseDataset(Dataset):
 			
 			src_input_ids.extend(answer_token_ids)
 			trg_label_ids.extend([-100] * len(question_token_ids))
+			# trg_label_ids.extend(question_token_ids)
 			trg_label_ids.extend(answer_token_ids)
 			
 			# Cut off the excess
@@ -343,3 +348,288 @@ class MBPP_Dataset(LibraryBaseDataset):
 			partitioned_data[f_id] = (q_str, a_str)
 		
 		return partitioned_data
+
+
+class MBPP_Dataset_w_PromptEmbedding(LibraryBaseDataset):
+	def __init__(
+			self,
+			path_to_data: str,
+			tokenizer: Any,
+			max_prompt_length: int = 512,
+			max_length: int = 512,
+			mode: str = 'train',
+			sample_problems: Union[int, None] = None,
+			split: float = 0.5
+	):
+		# # Initialize mode before calling super().__init__
+		# max_length=2048 if ('EleutherAI' in args.arch or '2700' in args.load) else 1024 <- From APPS github repo
+		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
+		self.split = split
+		
+		embedding_path = f'./logging/{mode}_prompt_embeddings.pkl'
+		self.prompt_embeddings = torch.load(embedding_path)
+		
+		super().__init__(path_to_data, tokenizer, max_prompt_length, max_length, mode)
+	
+	def read_data(self):
+		
+		# Read the MBPP data
+		with open(self.path_to_data, 'r') as f:
+			data = f.readlines()
+		
+		data = [json.loads(d) for d in data]
+		
+		# Divide into train-test
+		if self.mode == 'train':
+			data = data[:int(self.split * len(data))]
+		elif self.mode == 'test':
+			data = data[int(self.split * len(data)):]
+		
+		partitioned_data = {}
+		for problem in tqdm(data, ncols=0, total=len(data),
+							desc="Reading MBPP examples from {} (mode = {}): ".format(self.path_to_data,
+																					  self.mode)):
+			f_id = problem['task_id']
+			q_str = problem['prompt']
+			a_str = problem['canonical_solution']
+			partitioned_data[f_id] = (q_str, a_str)
+		
+		return partitioned_data
+	
+	def sample(self, idx: int):
+		"""
+		Overriding the sample method to return the prompt embedding as well.
+		:param idx:
+		:return:
+		"""
+		_id = self.ids[idx]
+		
+		try:
+			prompt_embedding = self.prompt_embeddings[_id]
+		except KeyError:
+			raise KeyError(f"Prompt embedding not found for {_id}")
+		
+		prompt_embedding = torch.squeeze(prompt_embedding)
+		
+		if self.mode == 'train':
+			src_input_ids, src_mask, trg_label_ids, trg_mask = super().sample(idx)
+		
+			return prompt_embedding, src_input_ids, src_mask, trg_label_ids, trg_mask
+		
+		else:
+			src_input_ids, src_mask = super().sample(idx)
+			return prompt_embedding, src_input_ids, src_mask
+
+
+class MBPP_Dataset_w_CodeBERT(LibraryBaseDataset):
+	def __init__(
+			self,
+			path_to_data: str,
+			tokenizer: Any,
+			max_prompt_length: int = 512,
+			max_length: int = 512,
+			mode: str = 'train',
+			sample_problems: Union[int, None] = None,
+			split: float = 0.5
+	):
+		# # Initialize mode before calling super().__init__
+		# max_length=2048 if ('EleutherAI' in args.arch or '2700' in args.load) else 1024 <- From APPS github repo
+		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
+		self.split = split
+		
+		# Load BERT tokenizer
+		bert_model_type = 'codebert-base'
+		logger.info(f"Loading tokenizer from {get_huggingface_path(bert_model_type)}")
+		self.bert_tokenizer = load_tokenizer(bert_model_type, get_huggingface_path(bert_model_type))
+		
+		
+		super().__init__(path_to_data, tokenizer, max_prompt_length, max_length, mode)
+	
+	def read_data(self):
+		
+		# Read the MBPP data
+		with open(self.path_to_data, 'r') as f:
+			data = f.readlines()
+		
+		data = [json.loads(d) for d in data]
+		
+		# Divide into train-test
+		if self.mode == 'train':
+			data = data[:int(self.split * len(data))]
+		elif self.mode == 'test':
+			data = data[int(self.split * len(data)):]
+		
+		partitioned_data = {}
+		for problem in tqdm(data, ncols=0, total=len(data),
+							desc="Reading MBPP examples from {} (mode = {}): ".format(self.path_to_data,
+																					  self.mode)):
+			f_id = problem['task_id']
+			q_str = problem['prompt']
+			a_str = problem['canonical_solution']
+			partitioned_data[f_id] = (q_str, a_str)
+		
+		return partitioned_data
+	
+	def get_bert_ip(self, idx):
+		q_str, _ = self.data[self.ids[idx]]
+		src_tokens = self.bert_tokenizer.tokenize(q_str)
+		
+		max_bert_length = self.max_prompt_length - 2  # [CLS] and [SEP]
+		src_tokens = src_tokens[-max_bert_length:]  # Truncate the prompt from left
+		src_tokens = [self.bert_tokenizer.cls_token] + src_tokens + [self.bert_tokenizer.sep_token]
+		src_token_ids = self.bert_tokenizer.convert_tokens_to_ids(src_tokens)
+		
+		# Pad from right
+		pad_length = self.max_prompt_length - len(src_token_ids)
+		src_token_ids = src_token_ids + [self.bert_tokenizer.pad_token_id] * pad_length
+		
+		# Convert to tensors
+		src_token_ids = torch.LongTensor(src_token_ids)
+		src_mask = src_token_ids.ne(self.bert_tokenizer.pad_token_id)  # mask out padding
+		
+		return src_token_ids, src_mask
+		
+
+	def sample(self, idx: int):
+		"""
+		Overriding the sample method to return the input for CodeBERT as well.
+		:param idx:
+		:return:
+		"""
+		
+		_id = self.ids[idx]
+		
+		# Get the input for CodeBERT
+		bert_input_ids, bert_mask = self.get_bert_ip(idx)
+		
+		if self.mode == 'train':
+			src_input_ids, src_mask, trg_label_ids, trg_mask = super().sample(idx)
+			return bert_input_ids, bert_mask, src_input_ids, src_mask, trg_label_ids, trg_mask
+		
+		else:
+			src_input_ids, src_mask = super().sample(idx)
+			return bert_input_ids, bert_mask, src_input_ids, src_mask
+
+
+class MBPP_Dataset_only_CodeBERT(Dataset):
+	def __init__(
+			self,
+			path_to_data: str,
+			tokenizer: Any,
+			max_prompt_length: int = 512,
+			max_length: int = 512,
+			mode: str = 'train',
+			sample_problems: Union[int, None] = None,
+			split: float = 0.5
+	):
+		# # Initialize mode before calling super().__init__
+		# max_length=2048 if ('EleutherAI' in args.arch or '2700' in args.load) else 1024 <- From APPS github repo
+		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
+		self.split = split
+		
+		self.path_to_data = path_to_data
+		self.path_to_labels = './logging/train_most_likely_lib_idx_using_passk.json'
+		self.tokenizer = tokenizer
+		self.max_prompt_length = max_prompt_length
+		self.max_length = max_length
+		self.mode = mode
+		
+		# Read Data
+		self.data = self.read_data()
+		self.labels = self.read_labels()
+		self.ids: List[str] = list(self.data.keys())
+		
+	def read_data(self):
+		
+		# Read the MBPP data
+		with open(self.path_to_data, 'r') as f:
+			data = f.readlines()
+		
+		data = [json.loads(d) for d in data]
+		
+		# Divide into train-test
+		if self.mode == 'train':
+			data = data[:int(self.split * len(data))]
+		elif self.mode == 'test':
+			data = data[int(self.split * len(data)):]
+		
+		partitioned_data = {}
+		for problem in tqdm(data, ncols=0, total=len(data),
+							desc="Reading MBPP examples from {} (mode = {}): ".format(self.path_to_data,
+																					  self.mode)):
+			f_id = problem['task_id']
+			q_str = problem['prompt']
+			a_str = problem['canonical_solution']
+			partitioned_data[f_id] = (q_str, a_str)
+		
+		return partitioned_data
+	
+	def read_labels(self):
+		assert os.path.exists(self.path_to_labels), f"Labels not found at {self.path_to_labels}"
+		with open(self.path_to_labels, 'r') as f:
+			labels = json.load(f)
+			
+		return labels
+	
+	def get_bert_ip(self, idx):
+		q_str, _ = self.data[self.ids[idx]]
+		src_tokens = self.tokenizer.tokenize(q_str)
+		
+		max_bert_length = self.max_prompt_length - 2  # [CLS] and [SEP]
+		src_tokens = src_tokens[-max_bert_length:]  # Truncate the prompt from left
+		src_tokens = [self.tokenizer.cls_token] + src_tokens + [self.tokenizer.sep_token]
+		src_token_ids = self.tokenizer.convert_tokens_to_ids(src_tokens)
+		
+		# Pad from right
+		pad_length = self.max_prompt_length - len(src_token_ids)
+		src_token_ids = src_token_ids + [self.tokenizer.pad_token_id] * pad_length
+		
+		# Convert to tensors
+		src_token_ids = torch.LongTensor(src_token_ids)
+		src_mask = src_token_ids.ne(self.tokenizer.pad_token_id)  # mask out padding
+		
+		return src_token_ids, src_mask
+	
+	def sample(self, idx: int):
+		"""
+		Overriding the sample method to return the input for CodeBERT as well.
+		:param idx:
+		:return:
+		"""
+		
+		_id = self.ids[idx]
+		
+		# Get the input for CodeBERT
+		bert_input_ids, bert_mask = self.get_bert_ip(idx)
+		
+		# Get the label
+		assert _id in self.labels, f"Label not found for {_id}"
+		possible_labels: List[int] = self.labels[_id]
+		label = random.choice(possible_labels)
+		label = torch.LongTensor(label)
+
+		return bert_input_ids, bert_mask, label
+	
+	def __getitem__(self, idx):
+		return self.sample(idx)
+	
+	def __len__(self):
+		return len(self.data)
+	
+	def __repr__(self):
+		return f"Dataset({self.path_to_data})"
+	
+	def __str__(self):
+		return f"Dataset({self.path_to_data})"
+	
+	def __iter__(self):
+		return iter(self.data)
+	
+	def __contains__(self, item):
+		return item in self.data
+	
+	def __add__(self, other):
+		return self.data + other.data
+	
+	def get_ids(self):
+		return self.ids

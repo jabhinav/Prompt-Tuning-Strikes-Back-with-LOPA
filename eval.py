@@ -1,32 +1,25 @@
 import json
+import logging
 from collections import OrderedDict
 from typing import Dict, List
 
 import torch
+import os
 from tqdm import tqdm
 
 from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftMultiModel
 from utils.model import get_response_log_probs
-from utils.custom import save_best_lib_predictions_mbxp_format, save_predictions_mbxp_format
+from utils.custom import save_best_lib_predictions_mbxp_format, save_predictions_mbxp_format, log_dist
 from utils.config import get_config
-from utils.data import MBPP_Dataset as CustomDataset
-from utils.xformer import load_tokenizer, load_base_model
+from utils.data import MBPP_Dataset_w_CodeBERT as CustomDataset
+from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
+from utils.model import ClarificationCodeBERTPredictor
 
 
 @torch.no_grad()
 def evaluate(args, logger):
 	# Get the tokenizer
 	tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
-	
-	# Get the config
-	peft_config = PromptTuningConfig(
-		task_type=TaskType.MULTI_CAUSAL_LM,  # CAUSAL_LM, SEQ_2_SEQ_LM for Dec-only, Enc-Dec. MULTI is my custom field.
-		prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
-		num_virtual_tokens=args.num_virtual_tokens,
-		# prompt_tuning_init_text="Classify if tweet is a complaint or not:",  # Use this if prompt_tuning_init is TEXT
-		# tokenizer_name_or_path=args.model_name_or_path,  # Use this if prompt_tuning_init is TEXT
-		num_init_clusters=args.num_libraries,  # My custom field
-	)
 	
 	# Get the dataset
 	dataset = CustomDataset(
@@ -57,7 +50,7 @@ def evaluate(args, logger):
 		del loaded_state_dict
 		
 		# Log the loaded checkpoint
-		message = "Loaded model checkpoint from path: {}".format(args.load_base_from_path)
+		message = "[INFO] Loaded model checkpoint from path: {}".format(args.load_base_from_path)
 		logger.info(message)
 		print(message)
 	
@@ -66,6 +59,17 @@ def evaluate(args, logger):
 		model.config.pad_token_id = tokenizer.pad_token_id
 	
 	if args.do_peft:
+		
+		# Get the config
+		peft_config = PromptTuningConfig(
+			task_type=TaskType.MULTI_CAUSAL_LM,
+			# CAUSAL_LM, SEQ_2_SEQ_LM for Dec-only, Enc-Dec. MULTI is my custom field.
+			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
+			num_virtual_tokens=args.num_virtual_tokens,
+			# prompt_tuning_init_text="Classify if tweet is a complaint or not:",  # Use this if prompt_tuning_init is TEXT
+			# tokenizer_name_or_path=args.model_name_or_path,  # Use this if prompt_tuning_init is TEXT
+			num_init_clusters=args.num_libraries,  # My custom field
+		)
 		
 		if args.load_adapter_from is None:
 			logger.error("Please specify the path to load the model adapters from")
@@ -77,7 +81,7 @@ def evaluate(args, logger):
 			model_id=args.load_adapter_from,  # Must be a directory containing the model files
 			config=peft_config,
 		)
-		msg = "Loaded the model adapters from: {}".format(args.load_adapter_from)
+		msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
 		logger.info(msg)
 		print(msg)
 	
@@ -89,20 +93,21 @@ def evaluate(args, logger):
 	
 	oracle_output: Dict[str, Dict[str, List[str]]] = {}
 	lib_mapping:  Dict[str, int] = {}
-	
+	get_clf_idx = get_clf_idx_using_NN(args, logger)  # Define the function to get the library index
 	model.eval()
-	
 	for index in tqdm(range(len(dataset)), desc="Predicting", position=0, leave=True):
 		sample = dataset.sample(index)
 		sample = tuple(tensor.unsqueeze(0).to(args.device) for tensor in sample)
-		input_ids, attention_mask = sample
+		# input_embeds, input_ids, attention_mask = sample
+		bert_inputs_ids, bert_mask, input_ids, attention_mask = sample
 		
 		# ############################## Add logic for identifying the library index ############################## #
-		chosen_lib_idx = None
-		if args.do_peft:
-			chosen_lib_idx = get_library_index(args, input_ids, attention_mask, tokenizer, model)
+		chosen_clf_idx = None
+		if args.do_peft and get_clf_idx is not None:
+			# chosen_lib_idx = get_clf_idx_using_prompt_ll(args, input_ids, attention_mask, tokenizer, model)
+			# chosen_lib_idx = get_clf_idx(input_embeds)  # For MLP as NN classifier
+			chosen_clf_idx = get_clf_idx(bert_inputs_ids, bert_mask)  # For BERT-like model as NN classifier
 			
-		
 		all_library_predictions: Dict[str, List[str]] = OrderedDict()
 		for k in range(args.num_libraries):
 			
@@ -158,8 +163,8 @@ def evaluate(args, logger):
 			
 		oracle_output[dataset.ids[index]] = all_library_predictions
 		
-		if chosen_lib_idx is not None:
-			lib_mapping[dataset.ids[index]] = int(chosen_lib_idx)
+		if chosen_clf_idx is not None:
+			lib_mapping[dataset.ids[index]] = int(chosen_clf_idx)
 			
 	# Save the output
 	# print(json.dumps(output, indent=4))
@@ -174,8 +179,9 @@ def evaluate(args, logger):
 
 
 @torch.no_grad()
-def get_library_index(args, prompt, prompt_mask, tokenizer, model):
+def get_clf_idx_using_prompt_ll(args, prompt, prompt_mask, tokenizer, model) -> int:
 	"""
+	Compute the library index using the log-likelihood of the prompt coming from the latent prompt of each library.
 	:param args:
 	:param prompt: (batch_size, seq_len)
 	:param prompt_mask: (batch_size, seq_len)
@@ -203,6 +209,60 @@ def get_library_index(args, prompt, prompt_mask, tokenizer, model):
 			library_idx = k
 			
 	return library_idx
+
+
+@torch.no_grad()
+def get_clf_idx_using_NN(args, logger):
+	"""
+	Compute the library index using a NN classifier.
+	:param args:
+	:param logger:
+	:return: library_idx: int
+	"""
+	
+	# Load checkpoint
+	if args.clf_predictor_path is None:
+		logger.info("Prior checkpoint not specified.")
+		return None
+	
+	if not os.path.exists(args.clf_predictor_path):
+		logger.info("Prior checkpoint not found at: {}".format(args.clf_predictor_path))
+		return None
+	
+	# test_prompt_embeddings = torch.load('./logging/test_prompt_embeddings.pkl')
+	# input_dim = test_prompt_embeddings[list(test_prompt_embeddings.keys())[0]].size(-1)
+	
+	# Add BERT specific args
+	args.bert_model_type = "codebert-base"
+	args.bert_tokenizer_name = get_huggingface_path(args.bert_model_type)
+	args.bert_model_name_or_path = get_huggingface_path(args.bert_model_type)
+	args.bert_config_name = get_huggingface_path(args.bert_model_type)
+	msg = f"Added model specific args for {args.bert_model_type}"
+	log_dist(message=msg, level=logging.INFO, ranks=[0])
+	
+	model = ClarificationCodeBERTPredictor(args=args, output_dim=args.num_libraries)
+	
+	loaded_state_dict = torch.load(args.clf_predictor_path, map_location="cpu")
+	loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
+	model.load_state_dict(loaded_state_dict, strict=True)
+	del loaded_state_dict
+	
+	print("[INFO] Loaded the clarification index predictor from: {}".format(args.clf_predictor_path))
+	
+	# GPU-ize the model
+	model.to(args.device)
+	model.eval()
+	
+	def get_clf_idx(bert_inputs_ids, bert_mask):
+		# probabilities, indices = model.predict(prompt_embedding)
+		
+		# When using BERT-like model as NN classifier
+		probabilities, indices = model.predict(bert_inputs_ids, bert_mask)
+		clf_idx = indices.detach().cpu().item()
+		
+		return clf_idx
+	
+	return get_clf_idx
 
 
 def main():
