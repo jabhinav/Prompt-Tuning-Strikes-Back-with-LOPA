@@ -12,7 +12,8 @@ import logging
 from utils.CustomTensorboardCallback import CustomTensorBoardCallback
 from utils.custom import is_rank_0, log_dist, create_dir, set_dist, set_seed
 from utils.data import MBPP_Dataset as CustomDataset
-from utils.model import load_tokenizer, load_base_model, get_huggingface_path
+from utils.model import load_base_model
+from utils.xformer import load_tokenizer, get_huggingface_path
 
 
 def get_config():
@@ -28,7 +29,7 @@ def get_config():
 	logger = logging.getLogger(__name__)
 	
 	# Define the parameters
-	model_type = "codegen2-1B"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
+	model_type = "codegen-350M"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
 	huggingface_path = get_huggingface_path(model_type)
 	
 	parser = argparse.ArgumentParser()
@@ -58,7 +59,7 @@ def get_config():
 	parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
 	
 	# #################################### Training-Optimizer Configuration #################################### #
-	parser.add_argument("--num_epochs", type=int, default=40)
+	parser.add_argument("--num_epochs", type=int, default=20)
 	parser.add_argument("--per_gpu_train_batch_size", type=int, default=2)
 	parser.add_argument("--lr", type=float, default=5e-5)
 	parser.add_argument('--gradient_accumulation_steps', type=int, default=8)
@@ -101,6 +102,8 @@ def get_config():
 	set_dist(args)
 	set_seed(args)
 	
+	update_args_with_custom_attributes(args)
+	
 	# Log the config
 	config: dict = vars(args)
 	config = {key: str(value) for key, value in config.items()}
@@ -112,7 +115,16 @@ def get_config():
 	return args, logger
 
 
+def update_args_with_custom_attributes(args):
+	# [[[HERE]]] For using training data split-1
+	args.finer_train_split = 0.75
+	args.use_train_first_half = True
+
+
 def learn(args, logger):
+	
+	if is_rank_0():
+		print(f"\n\nStarting training!! (Using train data split {args.finer_train_split}, First Half: {args.use_train_first_half})\n\n")
 	
 	# Get the tokenizer
 	tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
@@ -124,7 +136,11 @@ def learn(args, logger):
 		max_prompt_length=args.max_prompt_length,
 		max_length=args.max_length,
 		sample_problems=args.num_train_problems,
-		mode='train'
+		mode='train',
+		
+		# Uncomment to use a finer split of the training data to tune the baseline
+		finer_split=args.finer_train_split,
+		use_first_half=args.use_train_first_half
 	)
 	train_data.return_dict = True
 	

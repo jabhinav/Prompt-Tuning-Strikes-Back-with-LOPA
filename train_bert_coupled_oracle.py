@@ -1,5 +1,6 @@
 import os
 import sys
+import random
 from collections import defaultdict
 
 import torch
@@ -11,11 +12,26 @@ from transformers import get_constant_schedule_with_warmup
 import logging
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType
 from utils.config import get_config
-from utils.custom import log_dist
+from utils.custom import log_dist, is_rank_0
 from utils.data import MBPP_Dataset_w_CodeBERT as CustomDataset
 from utils.model import get_response_log_probs, compute_responsibilities, ClarificationCodeBERTPredictor, \
 	compute_grad_norm
 from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
+
+
+def _process(responsibilities):
+	responsibilities = responsibilities.cpu().numpy()[0].tolist()
+	# Round off to 2 decimal places each responsibility
+	responsibilities = [round(responsibility, 2) for responsibility in responsibilities]
+	return responsibilities
+
+
+@torch.no_grad()
+def has_cluster_converged(args, batch, model, tokenizer, k, threshold=0.99):
+	model.eval()
+	responsibilities = compute_responsibilities(args, batch, tokenizer, model)
+	responsibilities = _process(responsibilities)
+	return responsibilities[k] >= threshold, responsibilities[k]
 
 
 def learn(args, logger):
@@ -81,7 +97,7 @@ def learn(args, logger):
 		
 		# Log the loaded checkpoint
 		msg = "Loaded model checkpoint from path: {}".format(args.load_base_from_path)
-		if accelerator.is_local_main_process:
+		if is_rank_0():
 			logger.info(msg)
 			print(msg)
 	
@@ -110,98 +126,107 @@ def learn(args, logger):
 		model, optimizer, train_dataloader, lr_scheduler
 	)
 
-	if accelerator.is_local_main_process:
+	if is_rank_0():
 		logger.info("Starting EM for Library Learning")
 	
 	global_step = 0
-	# ############################################################################################################# #
 	# ######################################### Initialisation for EM ############################################## #
-	# ############################################################################################################# #
-	
 	# Initialise the model parameters i.e. latent prompt embeddings for each library
 	# This is equivalent to latching each library to a random sample from the dataset
-	if args.pre_num_iters > 0:
-		
-		# Set the lr for the initialisation phase
-		for param_group in optimizer.param_groups:
-			param_group['lr'] = args.init_lr
-		
-		rdm_idxs = torch.randint(0, len(dataset), (args.num_libraries,))
-		if accelerator.is_local_main_process:
-			print(f"[DEBUG] Random Indices: {rdm_idxs}")
-		
-		model.train()
-		for k in range(args.num_libraries):
+	
+	# Set the lr for the initialisation phase
+	for param_group in optimizer.param_groups:
+		param_group['lr'] = args.init_lr
+	
+	# Get random samples from the dataset
+	rdm_idxs = torch.randint(0, len(dataset), (args.num_libraries,))
+	
+	# To randomly shuffle the order of library initialisation
+	rdm_lib_idxs = list(range(args.num_libraries))
+	random.shuffle(rdm_lib_idxs)
+	
+	for z in tqdm(range(args.num_init_epochs), desc=f"Initialisation", position=0, leave=True):
 
-			if accelerator.is_local_main_process:
-				logger.info("Initialisation for Library %d", k)
+		for k in range(args.num_libraries):
 			
+			if is_rank_0():
+				logger.info(f"({z}) Initialisation for Library {k}")
+			
+			# Get the sample from the dataset
 			idx = rdm_idxs[k]
 			batch = dataset.sample(idx)
 			batch = tuple(t.unsqueeze(0).to(args.device) for t in batch)
-			bert_prompt, bert_prompt_mask, prompt, prompt_mask, response, response_mask = batch
 			
-			for i in tqdm(range(args.pre_num_iters), desc=f"Init. Iterations Clf {k}", position=0, leave=True,
-						  disable=not accelerator.is_local_main_process):
+			# Remove the first two tensors from the batch i.e. prior input tensors
+			batch = batch[2:]
+			
+			# Train the model for a few iterations until each cluster has converged
+			max_iter = args.pre_num_iters
+			curr_iter = 0
+			converged, prob = has_cluster_converged(args, batch, model, tokenizer, k)
+			pbar = tqdm(desc=f"({z}) Init. Iterations Lib {k}: {prob}", position=0, leave=True, total=max_iter)
+			# for i in tqdm(range(args.pre_num_iters), desc=f"Init. Iterations Lib {k}", position=0, leave=True):
+			while not converged:
+				model.train()
 				
 				# Get the response log-probability of the sample coming from the latent prompt of library k
-				resp_log_prob = get_response_log_probs(
-					args,
-					(prompt, prompt_mask, response, response_mask),
-					tokenizer,
-					model,
-					k
-				)
-				
-				# Normalise along the decoding length dimension
-				resp_log_prob = resp_log_prob / (args.max_length+args.max_prompt_length)
-				
-				loss = -resp_log_prob.mean()  # Across the batch (here batch_size=1)
+				resp_log_prob = get_response_log_probs(args, batch, tokenizer, model, k)
+				loss = -resp_log_prob.sum()  # resp. = 1 for the sample coming from the latent prompt of library k
 				
 				# Update the model parameters
 				accelerator.backward(loss)
+				grad_norm = compute_grad_norm(model)
 				optimizer.step()
 				lr_scheduler.step()  # Make sure this is constant schedule with no warmup
 				optimizer.zero_grad()
 				
-				# if accelerator.is_local_main_process:
-				# 	logger.info(f"Iter {i} Loss: {loss.detach().cpu().numpy().item()}")
-				
 				if args.wandb_logging:
-					accelerator.log({f'init_loss/clf_{k}': loss.detach().cpu().numpy().item()}, step=global_step)
-					
+					accelerator.log({
+						f'init_loss/clf_{k}': loss.detach().cpu().numpy().item(),
+						f'init_grad_norm/clf_{k}': grad_norm,
+						f'init_prob/clf_{k}': prob,
+					}, step=global_step)
+				
 				global_step += 1
 				
+				pbar.update(1)
+				converged, prob = has_cluster_converged(args, batch, model, tokenizer, k)
+				pbar.set_description(f"({z}) Init. Iterations Lib {k}: {prob}")
+				
+				curr_iter += 1
+				if curr_iter >= max_iter:
+					break
+			
+			model.eval()
 			with torch.no_grad():
-				responsibilities = compute_responsibilities(args, (prompt, prompt_mask, response, response_mask),
-															tokenizer, model)
-				if accelerator.is_local_main_process:
-					logger.info(
-						f"[Init Responsibilities, After Training w Cluster {k}] {dataset.ids[idx]}: {responsibilities.cpu().numpy()[0].tolist()}")
-					print(
-						f"\n[Init Responsibilities, After Training w Cluster {k}] {dataset.ids[idx]}: {responsibilities.cpu().numpy()[0].tolist()}\n")
+				responsibilities = compute_responsibilities(args, batch, tokenizer, model)
+				responsibilities = _process(responsibilities)
+				if is_rank_0():
+					logger.info(f"[({z})Init Responsibilities, After Training w Cluster {k}] {dataset.ids[idx]}: {responsibilities}")
+					print(f"\n[({z})Init Responsibilities, After Training w Cluster {k}] {dataset.ids[idx]}: {responsibilities}\n")
 		
 		#  [Debug] Verification - no cluster is empty
+		logger.info("\n\nFinal Init. Responsibilities for :-")
+		print("\n\nFinal Init. Responsibilities for :-")
+		model.eval()
 		with torch.no_grad():
 			for k in range(args.num_libraries):
 				idx = rdm_idxs[k]
 				batch = dataset.sample(idx)
 				batch = tuple(t.unsqueeze(0).to(args.device) for t in batch)
-				bert_prompt, bert_prompt_mask, prompt, prompt_mask, response, response_mask = batch
-				responsibilities = compute_responsibilities(args,
-															(prompt, prompt_mask, response, response_mask),
-															tokenizer, model)
-				if accelerator.is_local_main_process:
-					logger.info(
-						f"[Init Responsibilities, Final, GT Cluster {k}] {dataset.ids[idx]}: {responsibilities.cpu().numpy()[0].tolist()}")
-					print(
-						f"[Init Responsibilities, Final, GT Cluster {k}] {dataset.ids[idx]}: {responsibilities.cpu().numpy()[0].tolist()}")
+				
+				responsibilities = compute_responsibilities(args, batch, tokenizer, model)
+				responsibilities = _process(responsibilities)
+				
+				if is_rank_0():
+					logger.info(f"[({z})Cluster {k}] {dataset.ids[idx]}: {responsibilities}")
+					print(f"\n[({z})Cluster {k}] {dataset.ids[idx]}: {responsibilities}\n")
 	
 	# sys.exit()
 	# ############################################################################################################# #
 	# ################################################## EM ####################################################### #
 	# ############################################################################################################# #
-	if accelerator.is_local_main_process:
+	if is_rank_0():
 		logger.info("Starting EM for Clarification Prompt Tuning")
 	
 	# Reset the lr for the EM phase
@@ -233,75 +258,79 @@ def learn(args, logger):
 			
 			bert_prompt, bert_prompt_mask, prompt, prompt_mask, response, response_mask = batch
 			
-			for _ in range(args.max_m_steps):
-				lib_train_logs = {}
+			# for _ in range(args.max_m_steps):
+			q_func = 0  # Total log-likelihood of the data coming from library, metric to track convergence
+			lib_train_logs = {}
+			
+			# ################################### Train the clarification prior ################################ #
+			clf_logits = prior(bert_prompt, bert_prompt_mask)
+			
+			clf_preds = torch.nn.functional.softmax(clf_logits, dim=-1)
+			prior_loss = - (responsibilities * torch.log(clf_preds + 1e-8)).sum(dim=-1).mean()
+			
+			# Compute entropy regularisation
+			entropy = - (clf_preds * torch.log(clf_preds + 1e-8)).sum(dim=-1).mean()
+			
+			# Add entropy regularisation to the loss to avoid local optima
+			total_loss = prior_loss - args.ent_coeff * entropy
+			
+			accelerator.backward(total_loss)
+			grad_norm = compute_grad_norm(prior)
+			prior_optimizer.step()
+			prior_optimizer.zero_grad()
+			
+			# [Q-function] Initialise with the prior component
+			q_func += - prior_loss.detach().cpu().numpy().item()
+			
+			# Bookkeeping
+			lib_train_logs['clf_predictor_loss'] = total_loss.detach().cpu().numpy().item()
+			lib_train_logs['clf_predictor_prior_loss'] = prior_loss.detach().cpu().numpy().item()
+			lib_train_logs['clf_predictor_entropy'] = entropy.detach().cpu().numpy().item()
+			lib_train_logs['grad_norm/prior'] = grad_norm
+			
+			# ############################# Train clarification by clarification ############################### #
+			for k in range(args.num_libraries):
 				
-				# ################################### Train the clarification prior ################################ #
-				clf_preds = prior(bert_prompt, bert_prompt_mask)
-				prior_loss = - (responsibilities * torch.log(clf_preds + 1e-8)).sum(dim=-1).mean()
-				# Compute entropy regularisation
-				entropy = - (clf_preds * torch.log(clf_preds + 1e-8)).sum(dim=-1).mean()
-				# Add entropy regularisation to the loss to avoid local optima
-				total_loss = prior_loss - args.ent_coeff * entropy
+				k_responsibilities = responsibilities[:, k]
+				# # [For numerical stability] Re-normalise the respo. for library k TODO: affects EM ? (Yes)
+				# k_responsibilities = responsibilities[:, k] / responsibilities[:, k].sum()
+
+				# Likelihood of the sample coming from the latent prompt of library := p(x_n|z_k)
+				resp_log_prob = get_response_log_probs(
+					args,
+					(prompt, prompt_mask, response, response_mask),
+					tokenizer,
+					model,
+					k
+				)
+				# Compute Loss = Negative Log Likelihood of the sample coming from the latent prompt of library k
+				loss = -(resp_log_prob * k_responsibilities.detach()).mean()
 				
-				accelerator.backward(total_loss)
-				grad_norm = compute_grad_norm(prior)
-				prior_optimizer.step()
-				prior_optimizer.zero_grad()
+				# Update the model parameters
+				accelerator.backward(loss)
+				grad_norm = compute_grad_norm(model)
+				optimizer.step()
+				lr_scheduler.step()
+				optimizer.zero_grad()
 				
-				# [Q-function] Initialise  with the prior component
-				q_func = - prior_loss.detach().cpu().numpy().item()
+				# [Q-function] Add the LL component w.r.t each clf to the Q-function
+				q_func += -loss.detach().cpu().numpy().item()
 				
 				# Bookkeeping
-				lib_train_logs['clf_predictor_loss'] = total_loss.detach().cpu().numpy().item()
-				lib_train_logs['clf_predictor_prior_loss'] = prior_loss.detach().cpu().numpy().item()
-				lib_train_logs['clf_predictor_entropy'] = entropy.detach().cpu().numpy().item()
-				lib_train_logs['grad_norm/prior'] = grad_norm
-				
-				# ############################# Train clarification by clarification ############################### #
-				for k in range(args.num_libraries):
-					
-					k_responsibilities = responsibilities[:, k]
-					# # [For numerical stability] Re-normalise the respo. for library k TODO: affects EM ? (Yes)
-					# k_responsibilities = responsibilities[:, k] / responsibilities[:, k].sum()
-
-					# Likelihood of the sample coming from the latent prompt of library := p(x_n|z_k)
-					resp_log_prob = get_response_log_probs(
-						args,
-						(prompt, prompt_mask, response, response_mask),
-						tokenizer,
-						model,
-						k
-					)
-					# Compute Loss = Negative Log Likelihood of the sample coming from the latent prompt of library k
-					loss = -(resp_log_prob * k_responsibilities.detach()).mean()
-					
-					# Update the model parameters
-					accelerator.backward(loss)
-					grad_norm = compute_grad_norm(model)
-					optimizer.step()
-					lr_scheduler.step()
-					optimizer.zero_grad()
-					
-					# [Q-function] Add the LL component w.r.t each clf to the Q-function
-					q_func += -loss.detach().cpu().numpy().item()
-					
-					# Bookkeeping
-					lib_train_logs[f"loss/clf_{k}"] = loss.detach().cpu().numpy().item()
-					lib_train_logs[f"grad_norm/clf_{k}"] = grad_norm
+				lib_train_logs[f"loss/clf_{k}"] = loss.detach().cpu().numpy().item()
+				lib_train_logs[f"grad_norm/clf_{k}"] = grad_norm
+		
+			# ######################################## Log the results ###################################### #
+			if args.wandb_logging:
+				lib_train_logs.update({'q_func': q_func})
+				lib_train_logs.update({'lr': lr_scheduler.get_last_lr()[0]})  # Log the learning rate
+				accelerator.log(lib_train_logs, step=global_step)
 			
-				# ######################################## Log the results ###################################### #
-				
-				if args.wandb_logging:
-					lib_train_logs.update({'q_func': q_func})
-					lib_train_logs.update({'lr': lr_scheduler.get_last_lr()[0]})  # Log the learning rate
-					accelerator.log(lib_train_logs, step=global_step)
-				
-				global_step += 1
-	
+			global_step += 1
+		
 	# ################################################ Evaluate ################################################## #
 	# Count the frequency of  the sample-cluster assignments of the trained model
-	if accelerator.is_local_main_process:
+	if is_rank_0():
 		logger.info("Starting Evaluation")
 	
 	model.eval()
@@ -315,7 +344,8 @@ def learn(args, logger):
 			batch = tuple(t.unsqueeze(0).to(args.device) for t in batch)
 			
 			# Compute the prior probabilities
-			prior_probs = prior(batch[0], batch[1])
+			prior_logits = prior(batch[0], batch[1])
+			prior_probs = torch.nn.functional.softmax(prior_logits, dim=-1)
 			prior_probs = prior_probs.detach().cpu().numpy()[0]
 			
 			# Get the library index with the highest prior probability
@@ -324,7 +354,7 @@ def learn(args, logger):
 			# Store the library index
 			prior_freq_count[library_idx] += 1
 			
-			if accelerator.is_local_main_process:
+			if is_rank_0():
 				logger.info(f"[Prior] Sample {i} assigned to library {library_idx} from  {prior_probs}")
 			
 			# Compute the posterior probabilities
@@ -337,15 +367,15 @@ def learn(args, logger):
 			# Store the library index
 			posterior_freq_count[library_idx] += 1
 			
-			if accelerator.is_local_main_process:
+			if is_rank_0():
 				logger.info(f"[Posterior] Sample {i} assigned to library {library_idx} from {responsibilities}")
 		
-	if accelerator.is_local_main_process:
+	if is_rank_0():
 		logger.info("[Final] Prior Frequency Count: %s", prior_freq_count)
 		logger.info("[Final] Posterior Frequency Count: %s", posterior_freq_count)
 		
 	# ################################################ Save Model ################################################## #
-	if accelerator.is_local_main_process:  # only create checkpoint directory on main process
+	if is_rank_0():  # only create checkpoint directory on main process
 		logger.info("Saving the model at: %s", args.save_at)
 		if not os.path.exists(args.save_at):
 			os.makedirs(args.save_at)

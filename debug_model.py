@@ -112,10 +112,14 @@ def learn(args, logger):
 				lib_train_logs = {}
 				
 				# ################################### Train the clarification prior ################################ #
-				clf_preds = prior(bert_prompt, bert_prompt_mask)
+				clf_logits = prior(bert_prompt, bert_prompt_mask)
+				
+				clf_preds = torch.nn.functional.softmax(clf_logits, dim=-1)
 				prior_loss = - (responsibilities * torch.log(clf_preds + 1e-8)).sum(dim=-1).mean()
+				
 				# Compute entropy regularisation
 				entropy = - (clf_preds * torch.log(clf_preds + 1e-8)).sum(dim=-1).mean()
+				
 				# Add entropy regularisation to the loss to avoid local optima
 				total_loss = prior_loss - args.ent_coeff * entropy
 				

@@ -4,6 +4,7 @@ import torch
 from torch.nn import functional as F
 
 from utils.xformer import load_base_model
+from utils.custom import is_rank_0
 
 
 class ClarificationMLPPredictor(torch.nn.Module):
@@ -71,13 +72,16 @@ class ClarificationCodeBERTPredictor(torch.nn.Module):
 		x = torch.nn.functional.tanh(x)
 		x = self.dropout(x)
 		x = self.out_proj(x)
-		x = torch.nn.functional.softmax(x, dim=-1)
 		return x
 	
-	def predict(self, input_ids, attention_mask):
-		probabilities = self.forward(input_ids, attention_mask)
-		indices = torch.argmax(probabilities, dim=1)
-		return probabilities, indices
+	# def predict(self, input_ids, attention_mask):
+	# 	if self.return_logits:
+	# 		logits = self.forward(input_ids, attention_mask)
+	# 		probabilities = torch.nn.functional.softmax(logits, dim=-1)
+	# 	else:
+	# 		probabilities = self.forward(input_ids, attention_mask)
+	# 	indices = torch.argmax(probabilities, dim=1)
+	# 	return probabilities, indices
 
 
 def logprobs_from_logits(logits, labels):
@@ -142,11 +146,11 @@ def compute_responsibilities(args, batch, tokenizer, model, prior: Clarification
 	"""
 	
 	batch_size = batch[0].size(0)
-	if len(batch) == 6:
-		bert_prompt, bert_prompt_mask, prompt, prompt_mask, response, response_mask = batch
+	if len(batch) == 6:  # Do not use the prior as indicative of whether additional prompt is present
+		prior_prompt, prior_prompt_mask, prompt, prompt_mask, response, response_mask = batch
 	else:
 		prompt, prompt_mask, response, response_mask = batch
-		bert_prompt, bert_prompt_mask = None, None
+		prior_prompt, prior_prompt_mask = None, None
 	
 	# Create a tensor of shape (n_samples, num_libraries) to store the responsibilities
 	likelihood = torch.zeros((batch_size, args.num_libraries)).to(args.device)
@@ -166,8 +170,8 @@ def compute_responsibilities(args, batch, tokenizer, model, prior: Clarification
 		responsibilities = F.softmax(likelihood, dim=1)
 	else:
 		# Compute the prior probabilities
-		clf_preds = prior(bert_prompt, bert_prompt_mask)
-		log_prior = torch.log(clf_preds + 1e-8)
+		clf_logits = prior(prior_prompt, prior_prompt_mask)
+		log_prior = torch.nn.functional.log_softmax(clf_logits, dim=1)
 		log_prior = log_prior.to(args.device)
 		
 		# Add the log_prior to the likelihood

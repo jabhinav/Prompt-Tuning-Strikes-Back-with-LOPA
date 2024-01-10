@@ -23,7 +23,7 @@ def get_config():
 	logger = logging.getLogger(__name__)
 	
 	# Define the parameters
-	model_type = "codegen2-1B"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
+	model_type = "codegen-350M"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
 	huggingface_path = get_huggingface_path(model_type)
 	
 	parser = argparse.ArgumentParser()
@@ -31,8 +31,8 @@ def get_config():
 	# High-level
 	parser.add_argument('--wandb_logging', type=bool, default=True)
 	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
-	parser.add_argument('--do_peft', type=bool, default=True)
-	parser.add_argument('--seed', type=int, default=5995, help="random seed for initialization")
+	parser.add_argument('--do_peft', type=bool)
+	parser.add_argument('--seed', type=int, default=9876, help="random seed for initialization")
 	
 	# Paths
 	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')
@@ -56,12 +56,13 @@ def get_config():
 	
 	# Training
 	parser.add_argument("--num_epochs", type=int, default=5)
-	parser.add_argument("--pre_num_iters", type=int, default=200)
+	parser.add_argument("--num_init_epochs", type=int, default=5)
+	parser.add_argument("--pre_num_iters", type=int, default=500)
 	parser.add_argument("--max_m_steps", type=int, default=1)
 	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)
 	parser.add_argument("--lr", type=float, default=5e-5)
-	parser.add_argument("--init_lr", type=float, default=5e-4)
-	parser.add_argument("--prior_lr", type=float, default=1e-5)
+	parser.add_argument("--init_lr", type=float, default=5e-3)
+	parser.add_argument("--prior_lr", type=float, default=5e-6)
 	parser.add_argument("--ent_coeff", type=float, default=0.0)
 	
 	# Others
@@ -78,16 +79,14 @@ def get_config():
 	parser.add_argument("--temperature", type=float, default=0.6)
 	parser.add_argument("--top_p", type=float, default=0.95)
 	
+	parser.add_argument('--db', default=False,
+						help='set to turn on debug mode i.e. using dummy small data split and only 1 data worker')
 	# Hardware configuration
 	parser.add_argument("--load_in_8bit", type=bool, default=False,)
 	parser.add_argument("--no_cuda",
 						help="Avoid using CUDA when available")
-	parser.add_argument('--fp16', default=True, action='store_true',
-						help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
 	parser.add_argument("--local_rank", type=int, default=-1,
 						help="For distributed training (multi-node): local_rank")
-	parser.add_argument('--db', default=False,
-						help='set to turn on debug mode i.e. using dummy small data split and only 1 data worker')
 	parser.add_argument("--node_index", type=int, default=-1,
 						help="node index if multi-node running")
 	parser.add_argument("--gpu_per_node", type=int, default=4,
@@ -101,12 +100,10 @@ def get_config():
 	args.max_length = args.max_length - args.num_virtual_tokens
 	args.max_prompt_length = args.max_prompt_length - args.num_virtual_tokens
 	
-	# Update the number of lib if peft is not used
-	if not args.do_peft:
-		args.num_libraries = 1
-	
 	set_dist(args)
 	set_seed(args)
+	
+	update_args_with_custom_attributes(args)
 	
 	# Log the config
 	config: dict = vars(args)
@@ -117,3 +114,13 @@ def get_config():
 	log_dist(message=json.dumps(config, indent=4), level=logging.INFO, ranks=[0])
 	
 	return args, logger
+
+
+def update_args_with_custom_attributes(args):
+	# [[[HERE]]] For using training data split-2
+	args.finer_train_split = 0.75
+	args.use_train_first_half = False
+	
+	# [[[HERE]]] Only used by prior
+	args.path_to_train_prior_labels = './logging/codegen-350m/PEFT_Oracle_0.75_0.25/train_most_likely_lib_idx_using_prompt_ll.json'
+	

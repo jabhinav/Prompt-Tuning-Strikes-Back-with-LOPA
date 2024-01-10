@@ -67,6 +67,7 @@ def debug_memory(msg: str = "", device=0, accelerator=None):
 
 
 def is_rank_0() -> bool:
+	# Can also use accelerator.is_local_main_process if using Accelerator
 	return int(os.environ.get("RANK", "0")) == 0
 
 
@@ -131,7 +132,7 @@ def set_seed(args):
 
 def save_predictions_mbxp_format(
 		args,
-		output: Dict[str, Dict[str, List[str]]],
+		output: Union[Dict[str, Dict[str, List[str]]], Dict[str, List[str]]],
 		lang='python',
 		d_type='MBPP'
 ):
@@ -144,26 +145,37 @@ def save_predictions_mbxp_format(
 	:return:
 	"""
 	
-	# Save each library's predictions in a separate file
-	for k in range(args.num_libraries):
-		with open(os.path.join(args.log_dir, f'mbxp_solutions_lib_{k}.json'), 'w') as file:
-			for problem in output:
-				for response in output[problem][f'lib_{k}']:
-					result_dict: dict = {
-						"task_id": problem,
-						"language": lang,
-						"completion": response,
-						"data_type": d_type
-					}
-					file.write(json.dumps(result_dict) + '\n')
-		
-		logger.info(f"Saved predictions for library {k} in the format required by the MBXP evaluation script")
+	if args.do_peft:
+		# Save each library's predictions in a separate file
+		for k in range(args.num_libraries):
+			with open(os.path.join(args.log_dir, f'mbxp_solutions_lib_{k}.json'), 'w') as file:
+				for problem in output:
+					for response in output[problem][f'lib_{k}']:
+						result_dict: dict = {
+							"task_id": problem,
+							"language": lang,
+							"completion": response,
+							"data_type": d_type
+						}
+						file.write(json.dumps(result_dict) + '\n')
+			
+			logger.info(f"Saved predictions for library {k} in the format required by the MBXP evaluation script")
 	
 	# Flatten all the predictions in a single file
 	with open(os.path.join(args.log_dir, f'mbxp_solutions.json'), 'w') as file:
 		for problem in output:
-			for k in range(args.num_libraries):
-				for response in output[problem][f'lib_{k}']:
+			if args.do_peft:
+				for k in range(args.num_libraries):
+					for response in output[problem][f'lib_{k}']:
+						result_dict: dict = {
+							"task_id": problem,
+							"language": lang,
+							"completion": response,
+							"data_type": d_type
+						}
+						file.write(json.dumps(result_dict) + '\n')
+			else:
+				for response in output[problem]:
 					result_dict: dict = {
 						"task_id": problem,
 						"language": lang,
