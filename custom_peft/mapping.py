@@ -33,6 +33,17 @@ from .my_peft_lib_model import (
     PeftMultiModel,
     PeftMultiModelForCausalLM,
 )
+
+from .my_peft_cvae_model import (
+    PeftCvaeModel,
+    PeftCvaeModelForCausalLM,
+)
+
+from .my_peft_ccvae_model import (
+    PeftCcvaeModel,
+    PeftCcvaeModelForCausalLM,
+)
+
 from .tuners import (
     AdaLoraConfig,
     AdaLoraModel,
@@ -57,6 +68,8 @@ MODEL_TYPE_TO_PEFT_MODEL_MAPPING = {
     "SEQ_2_SEQ_LM": PeftModelForSeq2SeqLM,
     "CAUSAL_LM": PeftModelForCausalLM,
     "MULTI_CAUSAL_LM": PeftMultiModelForCausalLM,
+    "CVAE_CAUSAL_LM": PeftCvaeModelForCausalLM,
+    "CCVAE_CAUSAL_LM": PeftCcvaeModelForCausalLM,
     "TOKEN_CLS": PeftModelForTokenClassification,
     "QUESTION_ANS": PeftModelForQuestionAnswering,
     "FEATURE_EXTRACTION": PeftModelForFeatureExtraction,

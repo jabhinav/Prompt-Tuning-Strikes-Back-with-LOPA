@@ -12,6 +12,7 @@ from utils.model import ClarificationCodeBERTPredictor
 from utils.config import get_config
 from utils.xformer import load_tokenizer, get_huggingface_path
 from utils.data import MBPP_Dataset_only_CodeBERT as CustomDataset
+from utils.custom import is_rank_0
 
 
 def use_prior_to_get_clf_idxs(args, logger):
@@ -234,7 +235,7 @@ def train_clf_predictor(args, logger):
 def main():
 	args, logger = get_config()
 	args.per_gpu_train_batch_size = 2
-	args.num_epochs = 20
+	args.num_epochs = 50
 	
 	# # # For Debugging
 	# args.clf_predictor_path = './logging/clf_predictor.pt'

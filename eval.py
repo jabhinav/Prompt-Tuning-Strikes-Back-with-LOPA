@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 
 from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftMultiModel
-from utils.model import get_response_log_probs
+from utils.model import get_response_log_probs_for_lib
 from utils.custom import save_best_lib_predictions_mbxp_format, save_predictions_mbxp_format, log_dist
 from utils.config import get_config
 from utils.data import MBPP_Dataset_w_CodeBERT as CustomDataset
@@ -40,8 +40,8 @@ def get_clf_idx_using_prompt_ll(args, prompt, prompt_mask, tokenizer, model) -> 
 	for k in range(args.num_libraries):
 		
 		# Likelihood of the prompt coming from the latent prompt of library k
-		prompt_log_prob = get_response_log_probs(args, (prompt, prompt_mask, response, response_mask), tokenizer, model,
-												 k)
+		prompt_log_prob = get_response_log_probs_for_lib(args, (prompt, prompt_mask, response, response_mask), tokenizer, model,
+														 k)
 		
 		# Update the library index
 		if prompt_log_prob > max_likelihood:
@@ -85,9 +85,9 @@ def get_clf_idx_using_NN(args, logger):
 	loaded_state_dict = torch.load(args.clf_predictor_path, map_location="cpu")
 	loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
 	
-	# [For backward compt.] Replace the keys prob_head.weight, prob_head.bias with out_proj.weight, out_proj.bias
-	loaded_state_dict['out_proj.weight'] = loaded_state_dict.pop('prob_head.weight')
-	loaded_state_dict['out_proj.bias'] = loaded_state_dict.pop('prob_head.bias')
+	# # [For backward compt.] Replace the keys prob_head.weight, prob_head.bias with out_proj.weight, out_proj.bias
+	# loaded_state_dict['out_proj.weight'] = loaded_state_dict.pop('prob_head.weight')
+	# loaded_state_dict['out_proj.bias'] = loaded_state_dict.pop('prob_head.bias')
 	
 	model.load_state_dict(loaded_state_dict, strict=True)
 	del loaded_state_dict
@@ -111,9 +111,9 @@ def get_clf_idx_using_NN(args, logger):
 		
 		probabilities = probabilities.numpy()[0]
 		# If argmax is the chosen library index
-		# pred_clf_idx = np.argmax(probabilities)
+		pred_clf_idx = np.argmax(probabilities)
 		# If sampling is the chosen library index
-		pred_clf_idx = np.random.choice(np.arange(args.num_libraries), p=probabilities)
+		# pred_clf_idx = np.random.choice(np.arange(args.num_libraries), p=probabilities)
 		
 		return pred_clf_idx
 	
@@ -132,14 +132,14 @@ def evaluate(args, logger):
 		max_prompt_length=args.max_prompt_length,
 		max_length=args.max_length,
 		sample_problems=args.num_test_problems,
-		mode='train',
+		mode='test',
 	
 		# # Uncomment to use a finer split of the training data to evaluate
-		finer_split=0.75,
-		use_first_half=False
+		# finer_split=0.50,
+		# use_first_half=False
 	)
 	
-	# # Uncomment to use when testing on training data
+	# # Leave this as is to only read prompt for any type of data
 	dataset.mode = 'test'
 	
 	# Get the model
@@ -186,7 +186,6 @@ def evaluate(args, logger):
 			num_init_clusters=args.num_libraries,  # My custom field
 		)
 
-		
 		# Load the model adapters - in place
 		model = PeftMultiModel.from_pretrained(
 			model=model,
@@ -321,7 +320,6 @@ def evaluate(args, logger):
 				
 			oracle_output[dataset.ids[index]] = all_responses
 			
-			
 	# Save the output
 	# print(json.dumps(output, indent=4))
 	with open(args.save_results_at, 'w') as f:
@@ -331,11 +329,17 @@ def evaluate(args, logger):
 	if lib_mapping:
 		save_best_lib_predictions_mbxp_format(args, oracle_output, lib_mapping, lang='python', d_type='MBPP')
 	
-	save_predictions_mbxp_format(args, oracle_output, lang='python', d_type='MBPP')
+	save_predictions_mbxp_format(args, oracle_output, lang='python', d_type='MBPP', lib_size=args.num_libraries)
 
 
 def main():
 	args, logger = get_config()
+	
+	# # Debug
+	# args.do_peft = 1
+	# args.load_base_from_path = './logging/Baseline_0.50/output/pytorch_model.bin'
+	# args.load_adapter_from = './logging/PEFT_Oracle_0.50_0.50_20ep/PromptTuningMultiModel'
+	
 	evaluate(args, logger)
 
 

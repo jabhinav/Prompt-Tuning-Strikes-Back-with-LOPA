@@ -248,9 +248,14 @@ def get_peft_lib_model_state_dict(model, state_dict=None, adapter_name="default"
         to_return = {k: state_dict[k] for k in state_dict if k.split(".")[-1].startswith("adaption_")}
     elif config.is_prompt_learning:
         to_return = {}
-        prompt_embeddings = model.get_prompt_embedding_to_save(adapter_name) # Is now a Dict of Tensors instead of a Tensor
-        for k in range(config.num_init_clusters):
-            to_return[f'prompt_embeddings_{k}'] = prompt_embeddings[f'{k}']
+        prompt_embeddings = model.get_prompt_embedding_to_save(adapter_name)
+        
+        # Check if config has attribute num_init_clusters
+        if hasattr(config, "num_init_clusters") and config.num_init_clusters is not None:
+            for k in range(config.num_init_clusters):
+                to_return[f'prompt_embeddings_{k}'] = prompt_embeddings[f'{k}']
+        else:
+            to_return["prompt_embeddings"] = prompt_embeddings
         
     elif config.peft_type == PeftType.IA3:
         to_return = {k: state_dict[k] for k in state_dict if "ia3_" in k}
@@ -317,9 +322,14 @@ def set_peft_lib_model_state_dict(model, peft_model_state_dict, adapter_name="de
     
     if config.is_prompt_learning:
         
-        for k in range(config.num_init_clusters):
-            model.prompt_encoder[f'{adapter_name}_{k}'].embedding.load_state_dict(
-                {"weight": peft_model_state_dict[f"prompt_embeddings_{k}"]}, strict=True
+        if hasattr(config, "num_init_clusters") and config.num_init_clusters is not None:
+            for k in range(config.num_init_clusters):
+                model.prompt_encoder[f'{adapter_name}_{k}'].embedding.load_state_dict(
+                    {"weight": peft_model_state_dict[f"prompt_embeddings_{k}"]}, strict=True
+                )
+        else:
+            model.prompt_encoder[adapter_name].embedding.load_state_dict(
+                {"weight": peft_model_state_dict["prompt_embeddings"]}, strict=True
             )
     return load_result
 

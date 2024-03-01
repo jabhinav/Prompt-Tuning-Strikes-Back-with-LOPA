@@ -11,7 +11,7 @@ from transformers import get_constant_schedule_with_warmup
 
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType
 from utils.custom import is_rank_0
-from utils.model import get_response_log_probs, compute_responsibilities, compute_grad_norm
+from utils.model import get_response_log_probs_for_lib, compute_responsibilities, compute_grad_norm
 from utils.config import get_config
 from utils.data import MBPP_Dataset as CustomDataset
 from utils.xformer import load_tokenizer, load_base_model
@@ -29,7 +29,8 @@ def has_cluster_converged(args, batch, model, tokenizer, k, threshold=0.99):
 	model.eval()
 	responsibilities = compute_responsibilities(args, batch, tokenizer, model)
 	responsibilities = _process(responsibilities)
-	return responsibilities[k] >= threshold, responsibilities[k]
+	# return responsibilities[k] >= threshold, responsibilities[k]
+	return False, responsibilities[k]
 	
 	
 
@@ -174,7 +175,7 @@ def learn(args, logger):
 				model.train()
 				
 				# Get the response log-probability of the sample coming from the latent prompt of library k
-				resp_log_prob = get_response_log_probs(args, batch, tokenizer, model, k)
+				resp_log_prob = get_response_log_probs_for_lib(args, batch, tokenizer, model, k)
 				loss = -resp_log_prob.sum()  # resp. = 1 for the sample coming from the latent prompt of library k
 				
 				# Update the model parameters
@@ -260,6 +261,10 @@ def learn(args, logger):
 				# ############################# Train clarification by clarification ############################### #
 				for k in range(args.num_libraries):
 					
+					# # [Debug] let's see if model weights are getting changed
+					# if is_rank_0():
+					# 	print(f" Clarification {k}: {model.prompt_encoder[f'default_{k}'].embedding.state_dict()['weight']}")
+					
 					k_responsibilities = responsibilities[:, k]
 					# # Re-normalise the respo. for library k
 					# k_responsibilities = responsibilities[:, k] / responsibilities[:, k].sum()
@@ -274,7 +279,7 @@ def learn(args, logger):
 							)
 					
 					# Likelihood of the sample coming from the latent prompt of library := p(x_n|z_k)
-					resp_log_prob = get_response_log_probs(args, batch, tokenizer, model, k)
+					resp_log_prob = get_response_log_probs_for_lib(args, batch, tokenizer, model, k)
 					
 					# Compute Loss = Negative Log Likelihood of the sample coming from the latent prompt of library k
 					loss = -(resp_log_prob * k_responsibilities.detach()).sum()
@@ -346,6 +351,6 @@ def main():
 
 
 if __name__ == '__main__':
-	# To run with accelerate, $ accelerate launch --config_file ds_zero3_cpu.yaml train_oracle.py --load_base_from_path ./logging/codegen2-1b/output/pytorch_model.bin
+	# To run with accelerate, $ accelerate launch --config_file ds_zero3_cpu_nofp16.yaml train_oracle.py --load_base_from_path ./logging/codegen-350m/Baseline_0.50/output/pytorch_model.bin --do_peft 1
 	main()
 	

@@ -31,7 +31,7 @@ def get_config():
 	# High-level
 	parser.add_argument('--wandb_logging', type=bool, default=True)
 	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
-	parser.add_argument('--do_peft', type=bool)
+	parser.add_argument('--do_peft', type=int, default=None)
 	parser.add_argument('--seed', type=int, default=9876, help="random seed for initialization")
 	
 	# Paths
@@ -43,7 +43,7 @@ def get_config():
 	
 	# Prompt Tuning Parameters
 	parser.add_argument('--num_libraries', type=int, default=5)
-	parser.add_argument('--num_virtual_tokens', type=int, default=10)
+	parser.add_argument('--num_virtual_tokens', type=int, default=1)
 	parser.add_argument('--max_prompt_length', type=int, default=325)  # Max 384
 	parser.add_argument('--max_length', type=int, default=325+256)  # Max 384+512
 	parser.add_argument("--max_new_tokens", type=int, default=256)
@@ -55,15 +55,18 @@ def get_config():
 	parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
 	
 	# Training
-	parser.add_argument("--num_epochs", type=int, default=5)
+	parser.add_argument("--num_epochs", type=int, default=10)
 	parser.add_argument("--num_init_epochs", type=int, default=5)
 	parser.add_argument("--pre_num_iters", type=int, default=500)
-	parser.add_argument("--max_m_steps", type=int, default=1)
+	parser.add_argument("--max_m_steps", type=int, default=10)
 	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)
 	parser.add_argument("--lr", type=float, default=5e-5)
 	parser.add_argument("--init_lr", type=float, default=5e-3)
 	parser.add_argument("--prior_lr", type=float, default=5e-6)
 	parser.add_argument("--ent_coeff", type=float, default=0.0)
+	
+	# VAE params
+	parser.add_argument("--kl_coeff", type=float, default=1.0)
 	
 	# Others
 	parser.add_argument("--num_test_problems", type=int, default=None, choices=[None, 100])
@@ -118,9 +121,9 @@ def get_config():
 
 def update_args_with_custom_attributes(args):
 	# [[[HERE]]] For using training data split-2
-	args.finer_train_split = 0.75
-	args.use_train_first_half = False
+	args.finer_train_split = 1.0
+	args.use_train_first_half = True
 	
 	# [[[HERE]]] Only used by prior
-	args.path_to_train_prior_labels = './logging/codegen-350m/PEFT_Oracle_0.75_0.25/train_most_likely_lib_idx_using_prompt_ll.json'
+	args.path_to_train_prior_labels = './logging/train_gt_instance.json'
 	

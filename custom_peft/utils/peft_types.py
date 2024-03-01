@@ -34,6 +34,8 @@ class TaskType(str, enum.Enum):
     SEQ_2_SEQ_LM = "SEQ_2_SEQ_LM"
     CAUSAL_LM = "CAUSAL_LM"
     MULTI_CAUSAL_LM = "MULTI_CAUSAL_LM"  # Custom Added
+    CVAE_CAUSAL_LM = "CVAE_CAUSAL_LM"  # Custom Added
+    CCVAE_CAUSAL_LM = "CCVAE_CAUSAL_LM"  # Custom Added
     TOKEN_CLS = "TOKEN_CLS"
     QUESTION_ANS = "QUESTION_ANS"
     FEATURE_EXTRACTION = "FEATURE_EXTRACTION"

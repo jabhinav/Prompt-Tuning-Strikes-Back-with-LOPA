@@ -49,6 +49,16 @@ from .my_peft_lib_model import (
     PeftMultiModel,
     PeftMultiModelForCausalLM,
 )
+from .my_peft_cvae_model import (
+    PeftCvaeModel,
+    PeftCvaeModelForCausalLM,
+)
+
+from .my_peft_ccvae_model import (
+    PeftCcvaeModel,
+    PeftCcvaeModelForCausalLM,
+)
+
 from .tuners import (
     AdaptionPromptConfig,
     AdaptionPromptModel,

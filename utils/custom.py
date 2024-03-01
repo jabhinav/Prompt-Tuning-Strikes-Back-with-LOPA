@@ -14,6 +14,13 @@ from pynvml import *
 logger = logging.getLogger(__name__)
 
 
+def unwrap_model(model):
+	"""Unwrap the model from the DataParallel wrapper."""
+	if isinstance(model, torch.nn.DataParallel):
+		return model.module
+	return model
+
+
 def b2mb(x):
 	"""Convert bytes to megabytes."""
 	return int(x / 2 ** 20)
@@ -132,9 +139,10 @@ def set_seed(args):
 
 def save_predictions_mbxp_format(
 		args,
-		output: Union[Dict[str, Dict[str, List[str]]], Dict[str, List[str]]],
+		output,
 		lang='python',
-		d_type='MBPP'
+		d_type='MBPP',
+		lib_size=None
 ):
 	"""
 	Save the predictions in the format required by the MBXP evaluation script.
@@ -145,9 +153,9 @@ def save_predictions_mbxp_format(
 	:return:
 	"""
 	
-	if args.do_peft:
+	if args.do_peft and lib_size is not None:
 		# Save each library's predictions in a separate file
-		for k in range(args.num_libraries):
+		for k in range(lib_size):
 			with open(os.path.join(args.log_dir, f'mbxp_solutions_lib_{k}.json'), 'w') as file:
 				for problem in output:
 					for response in output[problem][f'lib_{k}']:
@@ -164,8 +172,8 @@ def save_predictions_mbxp_format(
 	# Flatten all the predictions in a single file
 	with open(os.path.join(args.log_dir, f'mbxp_solutions.json'), 'w') as file:
 		for problem in output:
-			if args.do_peft:
-				for k in range(args.num_libraries):
+			if args.do_peft and lib_size is not None:
+				for k in range(lib_size):
 					for response in output[problem][f'lib_{k}']:
 						result_dict: dict = {
 							"task_id": problem,

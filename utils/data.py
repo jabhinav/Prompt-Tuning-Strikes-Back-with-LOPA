@@ -120,11 +120,12 @@ class LibraryBaseDataset(Dataset):
 			
 			src_input_ids.extend(answer_token_ids)
 			
-			# # Want to generate prompt as part of the response
-			# trg_label_ids.extend(question_token_ids)
+			# # Want to generate prompt as part of the response [Uncomment]
+			trg_label_ids.extend(question_token_ids)
 			
 			# # Want to generate response only
-			trg_label_ids.extend([-100] * len(question_token_ids))
+			# trg_label_ids.extend([-100] * len(question_token_ids))
+			
 			trg_label_ids.extend(answer_token_ids)
 			
 			# Cut off the excess
@@ -444,6 +445,10 @@ class MBPP_Dataset_only_CodeBERT(Dataset):
 		
 		cls_weights = [0.0 for _ in range(self.num_classes)]
 		for _id, possible_labels in self.labels.items():
+			
+			if isinstance(possible_labels, int):
+				possible_labels: List[int] = [possible_labels]
+			
 			for label in possible_labels:
 				cls_weights[label] += 1.0
 		
@@ -486,7 +491,10 @@ class MBPP_Dataset_only_CodeBERT(Dataset):
 		# Get the label
 		if self.mode == 'train' and len(self.labels) > 0:
 			assert _id in self.labels, f"Label not found for {_id}"
-			possible_labels: List[int] = self.labels[_id]
+			if isinstance(self.labels[_id], int):
+				possible_labels: List[int] = [self.labels[_id]]
+			else:
+				possible_labels: List[int] = self.labels[_id]
 			
 			# Multi-label: one-hot encode
 			label = [1 if i in possible_labels else 0 for i in range(self.num_classes)]

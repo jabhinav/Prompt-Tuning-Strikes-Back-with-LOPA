@@ -5,29 +5,16 @@ from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
 from transformers import get_constant_schedule_with_warmup
 
-import logging
-from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType
+from custom_peft import PromptTuningInit, PromptTuningConfig, TaskType, PeftMultiModel
 from utils.config import get_config
-from utils.custom import log_dist
-from utils.data import MBPP_Dataset_w_CodeBERT as CustomDataset
-from utils.model import get_response_log_probs, compute_responsibilities, ClarificationCodeBERTPredictor, \
-	compute_grad_norm
-from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
+from utils.data import MBPP_Dataset as CustomDataset
+from utils.model import get_response_log_probs_for_lib, compute_responsibilities, compute_grad_norm
+from utils.xformer import load_tokenizer, load_base_model
 
 
 def learn(args, logger):
 	# Get the tokenizer
 	tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
-	
-	# Get the config
-	peft_config = PromptTuningConfig(
-		task_type=TaskType.MULTI_CAUSAL_LM,  # CAUSAL_LM, SEQ_2_SEQ_LM for Dec-only, Enc-Dec. MULTI is my custom field.
-		prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
-		num_virtual_tokens=args.num_virtual_tokens,
-		# prompt_tuning_init_text="Classify if tweet is a complaint or not:",  # Use this if prompt_tuning_init is TEXT
-		# tokenizer_name_or_path=args.model_name_or_path,  # Use this if prompt_tuning_init is TEXT
-		num_init_clusters=args.num_libraries,  # My custom field
-	)
 	
 	# Get the dataset
 	dataset = CustomDataset(
@@ -36,11 +23,15 @@ def learn(args, logger):
 		max_prompt_length=args.max_prompt_length,
 		max_length=args.max_length,
 		sample_problems=args.num_train_problems,
-		mode='train'
+		mode='train',
+		
+		# Uncomment to use a finer split of the training data to evaluate
+		finer_split=args.finer_train_split,
+		use_first_half=args.use_train_first_half
 	)
 	
 	# args.batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-	args.batch_size = 2
+	args.batch_size = 4
 	
 	# Prepare training data loader
 	sampler = RandomSampler(dataset)
@@ -55,7 +46,39 @@ def learn(args, logger):
 		load_in_8bit=args.load_in_8bit
 	)
 	
-	model = get_peft_model(model, peft_config)
+	# We load the model state dict on the CPU to avoid an OOM error.
+	loaded_state_dict = torch.load(args.load_base_from_path, map_location="cpu")
+	loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
+	model.load_state_dict(loaded_state_dict, strict=True)
+	
+	# release memory
+	del loaded_state_dict
+	
+	# Log the loaded checkpoint
+	msg = "Loaded model checkpoint from path: {}".format(args.load_base_from_path)
+	logger.info(msg)
+	print(msg)
+	
+	# Get the config
+	peft_config = PromptTuningConfig(
+		task_type=TaskType.MULTI_CAUSAL_LM,
+		# CAUSAL_LM, SEQ_2_SEQ_LM for Dec-only, Enc-Dec. MULTI is my custom field.
+		prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
+		num_virtual_tokens=args.num_virtual_tokens,
+		# prompt_tuning_init_text="Classify if tweet is a complaint or not:",  # Use this if prompt_tuning_init is TEXT
+		# tokenizer_name_or_path=args.model_name_or_path,  # Use this if prompt_tuning_init is TEXT
+		num_init_clusters=args.num_libraries,  # My custom field
+	)
+	
+	# Load the model adapters - in place
+	model = PeftMultiModel.from_pretrained(
+		model=model,
+		model_id=args.load_adapter_from,  # Must be a directory containing the model files
+		config=peft_config,
+	)
+	msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
+	logger.info(msg)
+	print(msg)
 	
 	trainable_params, all_param = model.get_nb_trainable_parameters()
 	msg = (f"trainable params: {trainable_params:,d} || all params: {all_param:,d} ||"
@@ -70,11 +93,6 @@ def learn(args, logger):
 		num_warmup_steps=0,
 	)
 	
-	# Load the library predictor
-	prior = ClarificationCodeBERTPredictor(args=args, output_dim=args.num_libraries)
-	prior_optimizer = torch.optim.Adam(prior.parameters(), lr=args.prior_lr)
-	prior.to(args.device)
-	
 	# ############################################################################################################# #
 	# ################################################## EM ####################################################### #
 	# ############################################################################################################# #
@@ -88,7 +106,6 @@ def learn(args, logger):
 		param_group['lr'] = args.lr
 	
 	model.train()
-	prior.train()
 	for ep in range(args.num_epochs):
 		for _ in tqdm(range(len(train_dataloader)), desc=f"EM Iterations Epoch {ep}", position=0, leave=True):
 			
@@ -99,53 +116,26 @@ def learn(args, logger):
 			batch = tuple(t.to(args.device) for t in batch)
 			
 			# Posterior probabilities of the sample coming from the latent prompt of each library := p(z_k|x_n)
-			responsibilities = compute_responsibilities(args, batch, tokenizer, model, prior)
+			responsibilities = compute_responsibilities(args, batch, tokenizer, model)
 			
 			# ################################################################################################# #
 			# ############################################### M-Step ########################################## #
 			# M-Step: Update the model parameters i.e. latent prompt embeddings for each clarification
 			#         by maximizing the likelihood of the data coming from it
 			
-			bert_prompt, bert_prompt_mask, prompt, prompt_mask, response, response_mask = batch
+			prompt, prompt_mask, response, response_mask = batch
 			
 			for _ in range(args.max_m_steps):
 				lib_train_logs = {}
-				
-				# ################################### Train the clarification prior ################################ #
-				clf_logits = prior(bert_prompt, bert_prompt_mask)
-				
-				clf_preds = torch.nn.functional.softmax(clf_logits, dim=-1)
-				prior_loss = - (responsibilities * torch.log(clf_preds + 1e-8)).sum(dim=-1).mean()
-				
-				# Compute entropy regularisation
-				entropy = - (clf_preds * torch.log(clf_preds + 1e-8)).sum(dim=-1).mean()
-				
-				# Add entropy regularisation to the loss to avoid local optima
-				total_loss = prior_loss - args.ent_coeff * entropy
-				
-				total_loss.backward()
-				grad_norm = compute_grad_norm(prior)
-				prior_optimizer.step()
-				prior_optimizer.zero_grad()
-				
-				# [Q-function] Initialise  with the prior component
-				q_func = - prior_loss.detach().cpu().numpy().item()
-				
-				# Bookkeeping
-				lib_train_logs['clf_predictor_loss'] = total_loss.detach().cpu().numpy().item()
-				lib_train_logs['clf_predictor_prior_loss'] = prior_loss.detach().cpu().numpy().item()
-				lib_train_logs['clf_predictor_entropy'] = entropy.detach().cpu().numpy().item()
-				lib_train_logs['grad_norm/prior'] = grad_norm
-				
+				q_func = 0.0
 				# ############################# Train clarification by clarification ############################### #
 				for k in range(args.num_libraries):
-					
 					k_responsibilities = responsibilities[:, k]
 					# # [For numerical stability] Re-normalise the respo. for library k TODO: affects EM (Yes) ?
 					# k_responsibilities = responsibilities[:, k] / responsibilities[:, k].sum()
 					
 					# Likelihood of the sample coming from the latent prompt of library := p(x_n|z_k)
-					resp_log_prob = get_response_log_probs(
+					resp_log_prob = get_response_log_probs_for_lib(
 						args,
 						(prompt, prompt_mask, response, response_mask),
 						tokenizer,
@@ -171,10 +161,8 @@ def learn(args, logger):
 				
 				# ######################################## Log the results ###################################### #
 				
-				if args.wandb_logging:
-					lib_train_logs.update({'q_func': q_func})
-					lib_train_logs.update({'lr': lr_scheduler.get_last_lr()[0]})  # Log the learning rate
-					# wandb.log(lib_train_logs, step=global_step)
+				lib_train_logs.update({'q_func': q_func})
+				lib_train_logs.update({'lr': lr_scheduler.get_last_lr()[0]})  # Log the learning rate
 				
 				global_step += 1
 	
@@ -183,7 +171,6 @@ def learn(args, logger):
 	logger.info("Starting Evaluation")
 	
 	model.eval()
-	prior.eval()
 	with torch.no_grad():
 		prior_freq_count = defaultdict(int)
 		posterior_freq_count = defaultdict(int)
@@ -191,20 +178,8 @@ def learn(args, logger):
 			batch = dataset.sample(i)
 			batch = tuple(t.unsqueeze(0).to(args.device) for t in batch)
 			
-			# Compute the prior probabilities
-			prior_probs = prior(batch[0], batch[1])
-			prior_probs = prior_probs.detach().cpu().numpy()[0]
-			
-			# Get the library index with the highest prior probability
-			library_idx = int(prior_probs.argmax())
-			
-			# Store the library index
-			prior_freq_count[library_idx] += 1
-			
-			logger.info(f"[Prior] Sample {i} assigned to library {library_idx} from  {prior_probs}")
-			
 			# Compute the posterior probabilities
-			responsibilities = compute_responsibilities(args, batch, tokenizer, model, prior)
+			responsibilities = compute_responsibilities(args, batch, tokenizer, model)
 			responsibilities = responsibilities.detach().cpu().numpy()[0]
 			
 			# Get the library index with the highest responsibility
@@ -222,13 +197,17 @@ def learn(args, logger):
 def main():
 	args, logger = get_config()
 	
-	# Add BERT specific args
-	args.bert_model_type = "codebert-base"
-	args.bert_tokenizer_name = get_huggingface_path(args.bert_model_type)
-	args.bert_model_name_or_path = get_huggingface_path(args.bert_model_type)
-	args.bert_config_name = get_huggingface_path(args.bert_model_type)
-	msg = f"Added model specific args for {args.bert_model_type}"
-	log_dist(message=msg, level=logging.INFO, ranks=[0])
+	# # Add BERT specific args
+	# args.bert_model_type = "codebert-base"
+	# args.bert_tokenizer_name = get_huggingface_path(args.bert_model_type)
+	# args.bert_model_name_or_path = get_huggingface_path(args.bert_model_type)
+	# args.bert_config_name = get_huggingface_path(args.bert_model_type)
+	# msg = f"Added model specific args for {args.bert_model_type}"
+	# log_dist(message=msg, level=logging.INFO, ranks=[0])
+	
+	args.do_peft = 1
+	args.load_base_from_path = './logging/Baseline_0.50/output/pytorch_model.bin'
+	args.load_adapter_from = './logging/PEFT_Oracle_0.50_0.50_100ep/PromptTuningMultiModel'
 	
 	learn(args, logger)
 

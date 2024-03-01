@@ -9,77 +9,9 @@ from tqdm import tqdm
 
 from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftMultiModel
 from utils.config import get_config
-from utils.model import get_response_embedding, get_response_log_probs
+from utils.model import get_response_embedding, get_response_log_probs_for_lib
 from utils.xformer import load_tokenizer, load_base_model
 
-
-@torch.no_grad()
-def save_prompt_embeddings(args, logger, mode):
-	# Get the tokenizer
-	tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
-	
-	from utils.data import MBPP_Dataset as CustomDataset
-	# Get the dataset
-	dataset = CustomDataset(
-		path_to_data=args.path_to_data,
-		tokenizer=tokenizer,
-		max_prompt_length=args.max_prompt_length,
-		max_length=args.max_length,
-		sample_problems=args.num_test_problems,
-		mode=mode
-	)
-	# [Hack] Manually override the mode to 'test' to get the question embeddings only in the prompt
-	dataset.mode = 'test'
-	
-	# Get the model
-	_, model = load_base_model(
-		model_type=args.model_type,
-		config_name=args.config_name,
-		model_path=args.model_name_or_path,
-		load_in_8bit=args.load_in_8bit
-	)
-	
-	# Load checkpoint
-	# We load the model state dict on the CPU to avoid an OOM error.
-	loaded_state_dict = torch.load(args.load_base_from_path, map_location="cpu")
-	loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
-	model.load_state_dict(loaded_state_dict, strict=True)
-	
-	# release memory
-	del loaded_state_dict
-	
-	# Log the loaded checkpoint
-	message = "Loaded model checkpoint from path: {}".format(args.load_base_from_path)
-	logger.info(message)
-	print(message)
-	
-	# Update the model's padding token id for open-ended generation
-	if 't5' not in args.model_type and model.config.pad_token_id is None:
-		model.config.pad_token_id = tokenizer.pad_token_id
-	
-	# GPU-ize the model
-	model.to(args.device)
-	
-	model.eval()
-	prompt_embeddings: Dict[str, torch.Tensor] = {}
-	for index in tqdm(range(len(dataset)), desc="Getting prompt embedding", position=0, leave=True):
-		sample = dataset.sample(index)
-		sample = tuple(tensor.unsqueeze(0).to(args.device) for tensor in sample)
-		prompt, prompt_mask = sample
-		
-		# Copy the prompt into the response tensor
-		response = prompt.clone()
-		response[response == tokenizer.pad_token_id] = -100  # Replace pad_token_id with labels [=-100]
-		response_mask = response.ne(-100)
-		
-		# Get the prompt embedding
-		prompt_embedding = get_response_embedding(model, prompt, prompt_mask, response)
-		
-		prompt_embeddings[dataset.ids[index]] = prompt_embedding.detach().cpu()
-		
-	# Save the output as pkl file
-	torch.save(prompt_embeddings, os.path.join(args.log_dir, f'{mode}_prompt_embeddings.pkl'))
-		
 		
 def count_num_lib(args, logger):
 	with open(os.path.join('./logging/codegen-350m', f'train_most_likely_lib_idx_using_prompt_ll.json'), 'r') as file:
@@ -117,16 +49,12 @@ def get_predicted_clf_freq():
 	print(freq_count)
 	
 
-def analyse_passk(args, logger):
+def analyse_passk(args, logger, oracle_results_file):
 	"""
 	Get the clarification indexes that achieve highest pass@k.
 	When done on train set, this will give us the most likely library index for each task to train the prior net.
-	:param args:
-	:param logger:
-	:return:
 	"""
 	# Read the jsonl file
-	oracle_results_file = './logging/results_train/mbxp_solutions.json_results.jsonl'
 	data = []
 	with open(oracle_results_file, 'r') as file:
 		for line in file:
@@ -148,6 +76,18 @@ def analyse_passk(args, logger):
 	oracle_results = {key: list(value) for key, value in oracle_results.items()}
 	logger.info(json.dumps(oracle_results, indent=4))
 	
+	# Create an instance of G.T. from Oracle by randomly choosing one clf idx from passed
+	gt = defaultdict(list)
+	for key in oracle_results.keys():
+		if len(oracle_results[key]) > 0:
+			gt[key] = [random.choice(oracle_results[key])]
+		else:
+			gt[key] = [random.choice(list(range(args.num_libraries)))]
+			
+	with open(os.path.join(args.log_dir, f'train_gt_instance.json'), 'w') as file:
+		json.dump(gt, file)
+	
+	# Get the problems that are solved by only one clf
 	uniques = defaultdict(set)
 	for key in oracle_results.keys():
 		if len(oracle_results[key]) == 1:
@@ -158,6 +98,7 @@ def analyse_passk(args, logger):
 	uniques = {key: list(value) for key, value in uniques.items()}
 	logger.info(json.dumps(uniques, indent=4))
 	
+	# Get the problems that are solved by only one clf
 	logger.info("None solved:")
 	none_solved = []
 	for key in oracle_results.keys():
@@ -169,6 +110,63 @@ def analyse_passk(args, logger):
 	# Save the output as json file
 	with open(os.path.join(args.log_dir, f'train_most_likely_lib_idx_using_passk.json'), 'w') as file:
 		json.dump(oracle_results, file)
+
+
+def analyse_multi_passk(args, logger):
+	
+	# Read each clarification's predictions
+	all_predictions = dict()
+	for k in range(args.num_libraries):
+		path = f'./logging/codegen-350m/PEFT_Oracle_0.50_0.50_20ep/train_split2_results_pass@10/mbxp_solutions_lib_{k}.json_results.jsonl'
+		with open(path, 'r') as file:
+			results = file.readlines()
+		
+		all_predictions[k] = dict()
+		# Count the number of times clf. passed each task
+		for result in results:
+			result = json.loads(result)
+			task_id = result['task_id']
+			
+			all_predictions[k][task_id] = all_predictions[k].get(task_id, 0)
+			if result['passed']:
+				all_predictions[k][task_id] += 1
+			
+	# Reformate the predictions so that each task has list of number of times a clf idx passed
+	hit_distribution = defaultdict(list)
+	for k in range(args.num_libraries):
+		for task_id in all_predictions[k].keys():
+			hit_distribution[task_id].append(all_predictions[k][task_id])
+	
+	# Now sort the indexes based on the number of times a clf idx passed
+	most_likely_solvers = defaultdict(list)
+	for task_id in hit_distribution.keys():
+		most_likely_solvers[task_id] = sorted(
+			[(k, v) for k, v in enumerate(hit_distribution[task_id])],
+			key=lambda x: x[1],
+			reverse=True
+		)
+
+	most_likely_solver = dict()
+	for task_id in most_likely_solvers.keys():
+		most_likely_solver[task_id] = most_likely_solvers[task_id][0][0]
+	
+	with open(os.path.join(args.log_dir, f'train_hit_distribution.json'), 'w') as file:
+		json.dump(hit_distribution, file)
+	with open(os.path.join(args.log_dir, f'train_most_likely_solvers.json'), 'w') as file:
+		json.dump(most_likely_solvers, file)
+	with open(os.path.join(args.log_dir, f'train_most_likely_lib_idx_using_passk.json'), 'w') as file:
+		json.dump(most_likely_solver, file)
+	
+	# Plot the distribution for each clf idx across all tasks. Each plot must be one below the other
+	import matplotlib.pyplot as plt
+	for k in range(args.num_libraries):
+		plt.figure()
+		plt.plot(list(all_predictions[k].keys()), list(all_predictions[k].values()), label=f'clf_{k}')
+		plt.title(f'Library {k}')
+		plt.xlabel('Tasks')
+		plt.ylabel('Number of times the clf idx passed')
+		plt.savefig(os.path.join(args.log_dir, f'hist_lib_{k}.png'), dpi=600)
+		plt.close()
 
 
 @torch.no_grad()
@@ -186,9 +184,9 @@ def analyse_prompt_ll(args, logger, mode='train'):
 		sample_problems=args.num_train_problems,
 		mode=mode,
 		
-		# Uncomment to use a finer split of the training data to learn the library
-		finer_split=0.75,
-		use_first_half=False
+		# Uncomment to use a finer split of the training data to compute prompt ll
+		finer_split=args.finer_train_split,
+		use_first_half=args.use_train_first_half
 	)
 	# [Hack] Manually override the mode to 'test' to get only the question embeddings in the prompt
 	dataset.mode = 'test'
@@ -254,7 +252,7 @@ def analyse_prompt_ll(args, logger, mode='train'):
 		max_likelihood = -float('inf')
 		for k in range(args.num_libraries):
 			with torch.no_grad():
-				likelihood = get_response_log_probs(args, sample, tokenizer, model, k)
+				likelihood = get_response_log_probs_for_lib(args, sample, tokenizer, model, k)
 			if likelihood > max_likelihood:
 				max_likelihood = likelihood
 				library_idx = k
@@ -266,7 +264,7 @@ def analyse_prompt_ll(args, logger, mode='train'):
 		json.dump(most_likely_lib_idx, file)
 		
 
-def use_pred_clf_idxs_to_extract_results(args, logger, pred_clf_idx_file, oracle_results_file, save_with: str = ''):
+def use_pred_clf_idxs_to_extract_results(args, pred_clf_idx_file, oracle_results_file, save_with: str = ''):
 	
 	# Get the predicted clf idxs
 	with open(pred_clf_idx_file, 'r') as file:
@@ -289,7 +287,7 @@ def use_pred_clf_idxs_to_extract_results(args, logger, pred_clf_idx_file, oracle
 		predicted_clf_idx = int(random.choice(predicted_clf_idxs))
 		
 		prior_results.append(oracle_results[idx + predicted_clf_idx])
-		
+	
 	# Save the output as jsonl file
 	with open(os.path.join(args.log_dir, f'mbxp_solutions_prior_{save_with}.jsonl'), 'w') as file:
 		for result in prior_results:
@@ -299,6 +297,8 @@ def use_pred_clf_idxs_to_extract_results(args, logger, pred_clf_idx_file, oracle
 def main():
 	args, logger = get_config()
 	
+	oracle_results_file = './logging/codegen-350m/PEFT_Oracle_1.0_1.0_5ep/10V/results_train/mbxp_solutions.json_results.jsonl'
+	
 	# count_num_lib(args, logger)
 	
 	# # To collect clarification indexes
@@ -307,17 +307,17 @@ def main():
 	# analyse_prompt_ll(args, logger)
 	
 	# # 2) Using pass@k
-	# analyse_passk(args, logger)
+	# analyse_passk(args, logger, oracle_results_file)
 	
-	oracle_results_file = './logging/codegen-350m/PEFT_Oracle_0.75_0.25/results/mbxp_solutions.json_results.jsonl'
+	# # Use the test clf idxs to compute results
+	# for ep in range(-1, 50):
+	# 	pred_clf_idx_file = f'./logging/20240111-054218/test_lib_predictions_{ep}.json'
+	# 	use_pred_clf_idxs_to_extract_results(args, pred_clf_idx_file, oracle_results_file, save_with=str(ep))
 	
-	# Use the test clf idxs to compute results
-	for ep in range(-1, 50):
-		pred_clf_idx_file = f'./logging/20240109-135048/test_lib_predictions_{ep}.json'
-		use_pred_clf_idxs_to_extract_results(args, logger, pred_clf_idx_file, oracle_results_file, save_with=str(ep))
+	pred_clf_idx_file = f'./logging/max_similarity_clf_idx.json'
+	use_pred_clf_idxs_to_extract_results(args, pred_clf_idx_file, oracle_results_file)
 	
-	# pred_clf_idx_file = f'./logging/prior_5/most_likely_lib_idx_using_prior_net.json'
-	# use_pred_clf_idxs_to_extract_results(args, logger, pred_clf_idx_file, oracle_results_file)
+	# analyse_multi_passk(args, logger)
 	
 
 if __name__ == '__main__':

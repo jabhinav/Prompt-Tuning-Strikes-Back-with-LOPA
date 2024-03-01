@@ -1,5 +1,5 @@
 import torch
-from utils.model import get_response_log_probs, compute_responsibilities_with_prior
+from utils.model import get_response_log_probs_for_lib, compute_responsibilities_with_prior
 
 
 @torch.no_grad()
@@ -24,7 +24,7 @@ def compute_Q_func(args, batch, tokenizer, model, prior=None):
 	
 	for k in range(args.num_libraries):
 		# Likelihood of the sample coming from the latent prompt of library := p(x_n|z_k)
-		resp_log_prob = get_response_log_probs(
+		resp_log_prob = get_response_log_probs_for_lib(
 			args,
 			(prompt, prompt_mask, response, response_mask),
 			tokenizer,

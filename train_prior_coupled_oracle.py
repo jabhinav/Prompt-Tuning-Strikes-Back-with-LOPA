@@ -14,7 +14,7 @@ from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, Ta
 from utils.config import get_config
 from utils.custom import log_dist, is_rank_0
 from utils.data import MBPP_Dataset_w_CodeBERT as CustomDataset
-from utils.model import get_response_log_probs, compute_responsibilities, ClarificationCodeBERTPredictor, \
+from utils.model import get_response_log_probs_for_lib, compute_responsibilities, ClarificationCodeBERTPredictor, \
 	compute_grad_norm
 from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
 
@@ -122,7 +122,7 @@ def learn(args, logger):
 	prior_optimizer = torch.optim.Adam(prior.parameters(), lr=args.prior_lr)
 	prior.to(args.device)
 	
-	model,  optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+	model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
 		model, optimizer, train_dataloader, lr_scheduler
 	)
 
@@ -139,7 +139,7 @@ def learn(args, logger):
 		param_group['lr'] = args.init_lr
 	
 	# Get random samples from the dataset
-	rdm_idxs = torch.randint(0, len(dataset), (args.num_libraries,))
+	rdm_idxs = random.sample(range(len(dataset)), args.num_libraries)
 	
 	# To randomly shuffle the order of library initialisation
 	rdm_lib_idxs = list(range(args.num_libraries))
@@ -170,7 +170,7 @@ def learn(args, logger):
 				model.train()
 				
 				# Get the response log-probability of the sample coming from the latent prompt of library k
-				resp_log_prob = get_response_log_probs(args, batch, tokenizer, model, k)
+				resp_log_prob = get_response_log_probs_for_lib(args, batch, tokenizer, model, k)
 				loss = -resp_log_prob.sum()  # resp. = 1 for the sample coming from the latent prompt of library k
 				
 				# Update the model parameters
@@ -296,7 +296,7 @@ def learn(args, logger):
 				# k_responsibilities = responsibilities[:, k] / responsibilities[:, k].sum()
 
 				# Likelihood of the sample coming from the latent prompt of library := p(x_n|z_k)
-				resp_log_prob = get_response_log_probs(
+				resp_log_prob = get_response_log_probs_for_lib(
 					args,
 					(prompt, prompt_mask, response, response_mask),
 					tokenizer,
