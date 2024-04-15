@@ -33,6 +33,9 @@ def compute_stats():
 	
 	
 def create_split():
+	
+	_split = 'train'
+	
 	# Get the tokenizer
 	model_type = "codegen-350M"
 	huggingface_path = get_huggingface_path(model_type)
@@ -40,25 +43,29 @@ def create_split():
 	
 	# Get the dataset
 	dataset = CustomDataset(
-		path_to_data="./data/MBPP/mbpp_release_v1.jsonl",
+		path_to_data="./MBPP/mbpp_release_v1.jsonl",
 		tokenizer=tokenizer,
 		max_prompt_length=325,
 		max_length=325+256,
 		sample_problems=None,
-		mode='test'
+		mode=_split,
+		
+		# Uncomment to create finer split of train data
+		finer_split=0.25,
+		use_first_half=False
 	)
 	
 	# Get task ids
-	test_tasks = dataset.get_ids()
+	_tasks = dataset.get_ids()
 	
 	# Create a separate jsonl file for test tasks
-	with open('./data/MBPP/mbpp_release_v1.jsonl', 'r') as f:
+	with open('./MBPP/mbpp_release_v1.jsonl', 'r') as f:
 		data = f.readlines()
 	
 	data = [json.loads(d) for d in data]
-	data = [d for d in data if d['task_id'] in test_tasks]
+	data = [d for d in data if d['task_id'] in _tasks]
 	
-	with open('./data/MBPP/mbpp_test_release_v1.jsonl', 'w') as f:
+	with open(f'./MBPP/mbpp_{_split}_release_v1_0.25_second.jsonl', 'w') as f:
 		for d in data:
 			f.write(json.dumps(d) + '\n')
 			
