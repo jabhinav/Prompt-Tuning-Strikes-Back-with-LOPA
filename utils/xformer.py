@@ -14,10 +14,6 @@ logger = logging.getLogger(__name__)
 MODEL_CLASSES = {
 	'roberta': (RobertaConfig, RobertaModel),
 	't5': (T5Config, T5ForConditionalGeneration),
-	'codet5-small': (T5Config, T5ForConditionalGeneration),
-	'codet5-base': (T5Config, T5ForConditionalGeneration),
-	'codet5-large': (T5Config, T5ForConditionalGeneration),
-	'codet5-large-ntp-py': (T5Config, T5ForConditionalGeneration),
 	'bart': (BartConfig, BartForConditionalGeneration),
 	'gpt2': (GPT2Config, GPT2LMHeadModel),
 	'gpt2-large': (GPT2Config, GPT2LMHeadModel),
@@ -28,6 +24,19 @@ MODEL_CLASSES = {
 	'bert': (BertConfig, BertForMaskedLM),
 	'distilbert': (DistilBertConfig, DistilBertForMaskedLM),
 	'codebert-base': (AutoConfig, AutoModel),
+	# ############################# Microsoft Phi Models ############################## #
+	'phi-1': (AutoConfig, AutoModelForCausalLM),
+	'phi-1_5': (AutoConfig, AutoModelForCausalLM),
+	'phi-2': (AutoConfig, AutoModelForCausalLM),
+	# ############################# Salesforce CodeT5 Models ############################# #
+	'codet5-small': (T5Config, T5ForConditionalGeneration),
+	'codet5-base': (T5Config, T5ForConditionalGeneration),
+	'codet5-large': (T5Config, T5ForConditionalGeneration),
+	'codet5-large-ntp-py': (T5Config, T5ForConditionalGeneration),
+	'codet5p-110m-embedding': (AutoConfig, AutoModel),
+	'codet5p-220m': (AutoConfig, T5ForConditionalGeneration),
+	'codet5p-770m': (AutoConfig, T5ForConditionalGeneration),
+	# ############################# Salesforce CodeGen Models ############################# #
 	'codegen-350M': (AutoConfig, AutoModelForCausalLM),
 	'codegen-2B': (AutoConfig, AutoModelForCausalLM),
 	'codegen-6B': (AutoConfig, AutoModelForCausalLM),
@@ -37,9 +46,14 @@ MODEL_CLASSES = {
 	'codegen2-7B': (AutoConfig, AutoModelForCausalLM),
 	'codegen2-16B': (AutoConfig, AutoModelForCausalLM),
 	'codegen25-7b-multi': (AutoConfig, AutoModelForCausalLM),  # Latest CodeGen2.5 7B model (Aug 2023)
+	# ############################# Meta LLama Models ############################# #
 	'CodeLlama-7b-Python-hf': (AutoConfig, AutoModelForCausalLM),
 	'CodeLlama-13b-Python-hf': (AutoConfig, AutoModelForCausalLM),
 	'CodeLlama-34b-Python-hf': (AutoConfig, AutoModelForCausalLM),
+	# ############################# DeepSeek-Coder Models ############################# #
+	'deepseek-coder-1.3b-base': (AutoConfig, AutoModelForCausalLM),
+	'deepseek-coder-7b-base': (AutoConfig, AutoModelForCausalLM),
+	'deepseek-coder-33b-base': (AutoConfig, AutoModelForCausalLM),
 }
 
 TOKENIZER_CLASSES = {
@@ -79,10 +93,10 @@ def load_tokenizer(model_type, tokenizer_name):
 	
 	tokenizer = tokenizer_class.from_pretrained(tokenizer_name, trust_remote_code=True)
 	
-	# GPT Tokenizers does not have pad_token. We add it here. (It will only be used for ease of use in my pipeline.)
-	if 't5' not in model_type and tokenizer.pad_token is None:
-		tokenizer.pad_token = tokenizer.eos_token
+	# Some Tokenizers do not have pad_token. We add it here. (It will only be used for ease of use in my pipeline.)
+	if tokenizer.pad_token_id is None or tokenizer.pad_token is None:
 		tokenizer.pad_token_id = tokenizer.eos_token_id
+		tokenizer.pad_token = tokenizer.eos_token
 	
 	# For Fast tokenizers imported from AutoTokenizer, they are missing some keys which we need that
 	# their corresponding (non-fast) slow tokenizers have.
@@ -131,6 +145,7 @@ def load_base_model(model_type, config_name, model_path, load_in_8bit: bool = Fa
 
 
 def get_huggingface_path(model: str) -> str:
+	# ############################# OpenAI GPT Models ############################# #
 	if model == 'gpt2':  # gpt2 (124M)
 		huggingface_path = 'gpt2'
 	elif model == 'gpt2-large':  # gpt2-medium(335M), gpt2-large (774M)
@@ -141,23 +156,33 @@ def get_huggingface_path(model: str) -> str:
 		huggingface_path = 'EleutherAI/gpt-neo-125M'
 	elif model == 'gpt-neo-1.3B':
 		huggingface_path = 'EleutherAI/gpt-neo-1.3B'  # 'EleutherAI/gpt-neo-1.3B' or 'EleutherAI/gpt-neo-2.7B'
+	# ############################# Microsoft BERT Models ############################# #
 	elif model == 'codebert-base' or model == 'codebert':
 		huggingface_path = 'microsoft/codebert-base'
+	# ############################# Microsoft Phi Models ############################## #
+	elif model == 'phi-1':
+		huggingface_path = 'microsoft/phi-1'  # 1.3B
+	elif model == 'phi-1_5':
+		huggingface_path = 'microsoft/phi-1_5'  # 1.3B + augmented with a new data source (NLP synthetic texts)
+	elif model == 'phi-2':
+		huggingface_path = 'microsoft/phi-2'  # 2.7B + augmented with new data sources (NLP synthetic texts + websites)
 	# ############################# Salesforce CodeT5 Models ############################# #
 	elif model == 'codet5-base':
 		huggingface_path = 'Salesforce/codet5-base'  # (220M)
 	elif model == 'codet5-large':
 		huggingface_path = 'Salesforce/codet5-large'  # (770M) Can use codet5-large-ntp-py for Python, else codet5-large
+	elif model == 'codet5p-110m-embedding':
+		huggingface_path = 'Salesforce/codet5p-110m-embedding'
 	elif model == 'codet5p-220m':
-		huggingface_path = 'Salesforce/codet5p-220m'  # Can use codet5p-220m-py for Python, else codet5p-220m
+		huggingface_path = 'Salesforce/codet5p-220m-py'  # Can use codet5p-220m-py for Python, else codet5p-220m
 	elif model == 'codet5p-770m':
-		huggingface_path = 'Salesforce/codet5p-770m'  # Can use codet5p-770m-py for Python, else codet5p-770m
+		huggingface_path = 'Salesforce/codet5p-770m-py'  # Can use codet5p-770m-py for Python, else codet5p-770m
 	elif model == 'codet5p-2b':
 		huggingface_path = 'Salesforce/codet5p-2b'
 	elif model == 'codet5p-6b':
 		huggingface_path = 'Salesforce/codet5p-6b'
 	elif model == 'codet5p-16b':
-		huggingface_path = 'Salesforce/codet5p-16b'
+		huggingface_path = 'Salesforce/codet5p-16b'  # Also has `instructcodet5p-16b`
 	# ############################# Salesforce CodeGen Models ############################# #
 	elif model == 'codegen-350M':
 		huggingface_path = 'Salesforce/codegen-350M-mono'  # Can use mono for Python, else multi
@@ -176,13 +201,21 @@ def get_huggingface_path(model: str) -> str:
 	elif model == 'codegen2-16B':
 		huggingface_path = 'Salesforce/codegen2-16B'
 	elif model == 'codegen25-7b-multi':
-		huggingface_path = 'Salesforce/codegen25-7b-multi'
+		huggingface_path = 'Salesforce/codegen25-7b-mono'  # Can use mono for Python, else multi. Also has `-instruct`
+	# ############################# Meta LLama Models ############################# #
 	elif model == 'CodeLlama-7b-Python-hf':
 		huggingface_path = 'codellama/CodeLlama-7b-Python-hf'
 	elif model == 'CodeLlama-13b-Python-hf':
 		huggingface_path = 'codellama/CodeLlama-13b-Python-hf'
 	elif model == 'CodeLlama-34b-Python-hf':
 		huggingface_path = 'codellama/CodeLlama-34b-Python-hf'
+	# ############################# DeepSeek-Coder Models ############################# #
+	elif model == 'deepseek-coder-1.3b-base':
+		huggingface_path = 'deepseek-ai/deepseek-coder-1.3b-base'
+	elif model == 'deepseek-coder-7b-base':
+		huggingface_path = 'deepseek-ai/deepseek-coder-7b-base-v1.5'  # This 1.5version is of size 6.9B which is further trained to be better than 6.7B
+	elif model == 'deepseek-coder-33b-base':
+		huggingface_path = 'deepseek-ai/deepseek-coder-33b-base'
 	else:
 		raise NotImplementedError()
 	

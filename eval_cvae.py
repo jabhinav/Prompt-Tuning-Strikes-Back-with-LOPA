@@ -4,25 +4,24 @@ from typing import Dict, List
 import torch
 from tqdm import tqdm
 
-from custom_peft import get_peft_model, PromptTuningConfig, TaskType, PromptTuningInit, PeftCvaeModel
+from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftCvaeModel
 from utils.config import get_config
-from utils.custom import save_predictions_mbxp_format
-from utils.data import MBPP_Dataset_w_CodeBERT as CustomDataset
-from utils.model import ClarificationCodeBERTPredictor, gumbel_softmax
+from utils.eval import save_predictions_mbxp_format
+from utils.data import MBPP_Dataset_wEnc as CustomDataset
+from utils.model import PromptSpecificClarificationEncoder as EmbeddingEncoder
 from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
 
 
-def load_encoder(args, logger):
+def load_encoder(args, logger, tokenizer):
 	"""
 			Initialize the encoder.
 	"""
-	# Add BERT specific args
-	args.bert_model_type = "codebert-base"
-	args.bert_tokenizer_name = get_huggingface_path(args.bert_model_type)
-	args.bert_model_name_or_path = get_huggingface_path(args.bert_model_type)
-	args.bert_config_name = get_huggingface_path(args.bert_model_type)
-	
-	model = ClarificationCodeBERTPredictor(args=args, output_dim=args.num_virtual_tokens)
+
+	model = EmbeddingEncoder(
+		args=args,
+		n_virtual_tokens=args.total_virtual_tokens,
+		word_embedding_dim=args.word_embedding_dim
+	)
 	
 	# Load the model state dict on the CPU to avoid an OOM error.
 	loaded_state_dict = torch.load(args.clf_predictor_path, map_location="cpu")
@@ -33,7 +32,7 @@ def load_encoder(args, logger):
 	del loaded_state_dict
 
 	# Log the loaded checkpoint
-	msg = "Loaded encoder checkpoint from path: {}".format(args.clf_predictor_path)
+	msg = "[INFO] Loaded encoder checkpoint from path: {}".format(args.clf_predictor_path)
 	logger.info(msg)
 	print(msg)
 	
@@ -64,14 +63,6 @@ def load_decoder(args, logger, tokenizer):
 		logger.info(message)
 		print(message)
 	
-	# Update the model's padding token id for open-ended generation
-	if 't5' not in args.model_type and decoder.config.pad_token_id is None:
-		decoder.config.pad_token_id = tokenizer.pad_token_id
-	
-	# if not os.path.exists(args.load_adapter_from):
-	# 	logger.error("Please specify the correct path to load the model adapters from")
-	# 	raise ValueError("Please specify the correct path to load the model adapters from")
-	
 	# Get the config
 	peft_config = PromptTuningConfig(
 		task_type=TaskType.CVAE_CAUSAL_LM,
@@ -86,29 +77,32 @@ def load_decoder(args, logger, tokenizer):
 		config=peft_config,
 	)
 	
-	# Initialize the model adapters
-	# decoder = get_peft_model(decoder, peft_config)
-	
 	msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
 	logger.info(msg)
 	print(msg)
+	
+	# This should match dimensions of torch.nn.Embedding(total_virtual_tokens, config.token_dim)
+	args.total_virtual_tokens = args.num_virtual_tokens * peft_config.num_transformer_submodules
+	args.word_embedding_dim = peft_config.token_dim
 	
 	return decoder
 
 
 @torch.no_grad()
 def evaluate(args, logger):
-	# Get the tokenizer
-	tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
+	# Get the tokenizers
+	dec_tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
+	enc_tokenizer = load_tokenizer(args.enc_model_type, get_huggingface_path(args.enc_model_type))
 	
 	# Get the dataset
 	dataset = CustomDataset(
 		path_to_data=args.path_to_data,
-		tokenizer=tokenizer,
+		tokenizer=dec_tokenizer,
 		max_prompt_length=args.max_prompt_length,
 		max_length=args.max_length,
 		sample_problems=args.num_test_problems,
 		mode='test',
+		enc_tokenizer=enc_tokenizer,
 		
 		# # Uncomment to use a finer split of the training data to evaluate
 		# finer_split=0.50,
@@ -118,17 +112,16 @@ def evaluate(args, logger):
 	# # Leave this as is to only read prompt for any type of data
 	dataset.mode = 'test'
 	
-	# Load the encoder model
-	encoder = load_encoder(args, logger)
-	encoder.to(args.device)
-	encoder.eval()
-
-	
 	# Load the decoder model
-	decoder = load_decoder(args, logger, tokenizer)
+	decoder = load_decoder(args, logger, dec_tokenizer)
 	decoder.to(args.device)
 	decoder.eval()
 	
+	# Load the encoder model
+	encoder = load_encoder(args, logger, enc_tokenizer)
+	encoder.to(args.device)
+	encoder.eval()
+
 	# Predict for each sample output by each library
 	num_loops = int(args.num_return_sequences / args.num_return_sequences_per_iter)
 	oracle_output: Dict[str, List[str]] = {}
@@ -149,8 +142,11 @@ def evaluate(args, logger):
 		# Get the latent attention weights
 		clf_logits = encoder(input_ids=bert_inputs_ids, attention_mask=bert_mask)
 		
-		# If directly using the logits
-		latent_attention_weights = torch.nn.functional.softmax(clf_logits, dim=-1)
+		# [Uncomment to] Use Softmax
+		# latent_attention_weights = torch.nn.functional.softmax(clf_logits, dim=-1)
+		
+		# [Uncomment to] Use Sigmoid
+		latent_attention_weights = torch.sigmoid(clf_logits)
 		
 		# Log the attention weights
 		logger.info("[{}] Attention weights: {}".format(index, latent_attention_weights[0].detach().cpu().numpy().tolist()))
@@ -178,12 +174,15 @@ def evaluate(args, logger):
 				)
 				
 				top_responses = top_responses.detach().cpu().numpy().tolist()
-				top_responses = [resp[sample[0].shape[1]:] for resp in top_responses]
-				top_responses = [tokenizer.decode(resp, skip_special_tokens=False) for resp in top_responses]
-				# Split the response at the first occurrence of the end of text token.
-				# This works since we append the eos token to responses and make the model predict it
-				# Also useful to not consider any text after the first occurrence of the eos token
-				top_responses = [resp.split(tokenizer.eos_token)[0] for resp in top_responses]
+				if 't5' not in args.model_type:  # For T5, we don't have to remove the prompt
+					top_responses = [resp[args.max_prompt_length:] for resp in top_responses]
+					top_responses = [dec_tokenizer.decode(resp, skip_special_tokens=False) for resp in top_responses]
+					# Split the response at the first occurrence of the end of text token.
+					# This works since we append the eos token to responses and make the model predict it
+					# Also useful to not consider any text after the first occurrence of the eos token
+					top_responses = [resp.split(dec_tokenizer.eos_token)[0] for resp in top_responses]
+				else:
+					top_responses = [dec_tokenizer.decode(resp, skip_special_tokens=True) for resp in top_responses]
 				all_responses.extend(top_responses)
 		
 		except Exception as e:
@@ -214,8 +213,8 @@ def main():
 	# # Debug
 	# args.do_peft = 1
 	# args.load_base_from_path = './logging/codegen-350m/Baseline_1.0/output/pytorch_model.bin'
-	# args.load_adapter_from = './logging/20240223-102557/PromptTuningMultiModel'
-	# args.clf_predictor_path = './logging/20240223-102557/clf_predictor.pt'
+	# args.load_adapter_from = './logging/20240314-201300/PromptTuningMultiModel'
+	# args.clf_predictor_path = './logging/20240314-201300/clf_predictor.pt'
 	
 	evaluate(args, logger)
 

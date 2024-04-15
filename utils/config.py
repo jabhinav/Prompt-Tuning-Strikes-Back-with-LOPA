@@ -23,7 +23,7 @@ def get_config():
 	logger = logging.getLogger(__name__)
 	
 	# Define the parameters
-	model_type = "codegen-350M"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
+	model_type = "phi-2"  # codegen-350M, phi-2, codegen2-3_7B, deepseek-coder-1.3b-base, deepseek-coder-7b-base
 	huggingface_path = get_huggingface_path(model_type)
 	
 	parser = argparse.ArgumentParser()
@@ -43,7 +43,7 @@ def get_config():
 	
 	# Prompt Tuning Parameters
 	parser.add_argument('--num_libraries', type=int, default=5)
-	parser.add_argument('--num_virtual_tokens', type=int, default=1)
+	parser.add_argument('--num_virtual_tokens', type=int, default=10)
 	parser.add_argument('--max_prompt_length', type=int, default=325)  # Max 384
 	parser.add_argument('--max_length', type=int, default=325+256)  # Max 384+512
 	parser.add_argument("--max_new_tokens", type=int, default=256)
@@ -56,17 +56,25 @@ def get_config():
 	
 	# Training
 	parser.add_argument("--num_epochs", type=int, default=10)
+	parser.add_argument("--per_gpu_train_batch_size", type=int, default=2)
+	parser.add_argument("--lr", type=float, default=1e-3)
+	parser.add_argument("--ent_coeff", type=float, default=0.0)
+	parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+	parser.add_argument("--num_warmup_steps", type=int, default=0)
+	parser.add_argument("--save_every", type=int, default=4)
+	
+	# EM-specific
 	parser.add_argument("--num_init_epochs", type=int, default=5)
 	parser.add_argument("--pre_num_iters", type=int, default=500)
 	parser.add_argument("--max_m_steps", type=int, default=10)
-	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)
-	parser.add_argument("--lr", type=float, default=5e-5)
 	parser.add_argument("--init_lr", type=float, default=5e-3)
 	parser.add_argument("--prior_lr", type=float, default=5e-6)
-	parser.add_argument("--ent_coeff", type=float, default=0.0)
 	
 	# VAE params
-	parser.add_argument("--kl_coeff", type=float, default=1.0)
+	parser.add_argument("--enc_model_type", type=str, default="codebert-base")  # "codebert-base", "codet5p-110m-embedding"
+	parser.add_argument("--enc_lr", type=float, default=1e-3)
+	parser.add_argument("--dec_lr", type=float, default=5e-4)
+	parser.add_argument("--kl_coeff", type=float, default=10.0)
 	
 	# Others
 	parser.add_argument("--num_test_problems", type=int, default=None, choices=[None, 100])
@@ -82,18 +90,17 @@ def get_config():
 	parser.add_argument("--temperature", type=float, default=0.6)
 	parser.add_argument("--top_p", type=float, default=0.95)
 	
+	# Debugging
 	parser.add_argument('--db', default=False,
 						help='set to turn on debug mode i.e. using dummy small data split and only 1 data worker')
+	
 	# Hardware configuration
 	parser.add_argument("--load_in_8bit", type=bool, default=False,)
-	parser.add_argument("--no_cuda",
-						help="Avoid using CUDA when available")
+	parser.add_argument("--no_cuda", help="Avoid using CUDA when available")
 	parser.add_argument("--local_rank", type=int, default=-1,
 						help="For distributed training (multi-node): local_rank")
-	parser.add_argument("--node_index", type=int, default=-1,
-						help="node index if multi-node running")
-	parser.add_argument("--gpu_per_node", type=int, default=4,
-						help="num of gpus per node")
+	parser.add_argument("--node_index", type=int, default=-1, help="node index if multi-node running")
+	parser.add_argument("--gpu_per_node", type=int, default=4, help="num of gpus per node")
 	
 	args = parser.parse_args()
 	

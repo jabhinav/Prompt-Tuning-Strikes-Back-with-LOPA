@@ -29,13 +29,12 @@ def get_config():
 	logger = logging.getLogger(__name__)
 	
 	# Define the parameters
-	model_type = "codegen-350M"  # codegen2-1B, codegen-350M, CodeLlama-7b-Python-hf
+	model_type = "codegen2-3_7B"  # codegen-350M, codegen2-1B, codegen2-3_7B, deepseek-coder-1.3b-base
 	huggingface_path = get_huggingface_path(model_type)
 	
 	parser = argparse.ArgumentParser()
 
 	# ############################################### High-level ################################################# #
-	parser.add_argument('--wandb_logging', type=bool, default=True)
 	parser.add_argument("--wandb_run_name", type=str, default=f'MBPP_{model_type}')
 	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
 	parser.add_argument('--seed', type=int, default=1234, help="random seed for initialization")
@@ -59,14 +58,15 @@ def get_config():
 	parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
 	
 	# #################################### Training-Optimizer Configuration #################################### #
-	parser.add_argument("--num_epochs", type=int, default=20)
-	parser.add_argument("--per_gpu_train_batch_size", type=int, default=2)
-	parser.add_argument("--lr", type=float, default=5e-5)
-	parser.add_argument('--gradient_accumulation_steps', type=int, default=8)
-	parser.add_argument("--warmup_steps", type=int, default=0)
+	parser.add_argument("--num_epochs", type=int, default=10)
+	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)  # 2 works for codegen-350M
+	parser.add_argument("--lr", type=float, default=1e-5)  # (5e-5, codegen-350M)
+	parser.add_argument('--gradient_accumulation_steps', type=int, default=8)  # 8 works for codegen-350M
+	parser.add_argument("--warmup_steps", type=int, default=100)
 	parser.add_argument("--weight_decay", type=float, default=0.05)
-	parser.add_argument("--lr_scheduler_type", type=str, default='constant_with_warmup',
-						choices=['linear', 'cosine', 'cosine_with_restarts', 'polynomial', 'constant_with_warmup'])
+	parser.add_argument("--lr_scheduler_type", type=str, default='cosine',
+						choices=['linear', 'cosine', 'cosine_with_restarts', 'polynomial', 'constant',
+								 'constant_with_warmup', 'inverse_sqrt', 'reduce_lr_on_plateau'])
 	
 	# #################################### Logging Configuration ############################################# #
 	parser.add_argument("--save_steps", default=0, type=int,
@@ -80,7 +80,7 @@ def get_config():
 	parser.add_argument("--load_in_8bit", type=bool, default=False)
 	parser.add_argument("--no_cuda",
 						help="Avoid using CUDA when available")
-	parser.add_argument('--fp16', default=True, action='store_true',
+	parser.add_argument('--fp16', action='store_true',
 						help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
 	parser.add_argument("--local_rank", type=int, default=-1,
 						help="For distributed training (multi-node): local_rank")
@@ -117,7 +117,7 @@ def get_config():
 
 def update_args_with_custom_attributes(args):
 	# [[[HERE]]] For using training data split-1
-	args.finer_train_split = 0.75
+	args.finer_train_split = 1.0
 	args.use_train_first_half = True
 
 
@@ -179,7 +179,7 @@ def learn(args, logger):
 		
 		do_train=True,
 		do_eval=False,  # Will be set to `True` if `evaluation_strategy` is different from `no`
-		do_predict=True,
+		do_predict=False,
 		evaluation_strategy='no',  # 'no', 'steps' (eval every `eval_steps`), 'epoch' (eval every end of epoch)
 		eval_steps=0,
 		
@@ -205,7 +205,7 @@ def learn(args, logger):
 		report_to=['wandb'],
 		run_name=args.wandb_run_name,  # name for the wandb run
 		
-		dataloader_drop_last=True,
+		dataloader_drop_last=False,
 		dataloader_num_workers=0 if args.db else 8,
 		
 		local_rank=args.local_rank,
@@ -244,5 +244,5 @@ def main():
 
 
 if __name__ == "__main__":
-	# To Use DeepSpeed (multi-gpu): $ USE_TF=NO deepspeed tune_baseline.py --fp16
+	# To Use DeepSpeed (multi-gpu): $ deepspeed tune_fft_baseline.py
 	main()

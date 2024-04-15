@@ -1,15 +1,15 @@
 import gc
-import json
 import logging
 import multiprocessing
 import pathlib
 import random
-from typing import List, Dict
+from typing import List
 
 import GPUtil
 import numpy as np
 import torch
 from pynvml import *
+from transformers import set_seed
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,27 @@ def debug_memory(msg: str = "", device=0, accelerator=None):
 			logger.info(f'[MEMORY USAGE {device}] {msg}: {torch.cuda.memory_allocated() / 1024 ** 3} GB')
 
 
+def check_available_gpu_memory():
+	# @title Check available memory of GPU
+	# Check that we are using 100% of GPU
+	# memory footprint support libraries/code
+	# Required Libraries: psutil, humanize, gputil, py3nvml (to track GPU memory usage)
+	import psutil
+	import humanize
+	import os
+	import GPUtil as GPU
+	GPUs = GPU.getGPUs()
+	# XXX: only one GPU on Colab and isn’t guaranteed
+	gpu = GPUs[0]
+	process = psutil.Process(os.getpid())
+	print("Gen RAM Free: " + humanize.naturalsize(psutil.virtual_memory().available),
+		  " | Proc size: " + humanize.naturalsize(process.memory_info().rss))
+	print("GPU RAM Free: {0:.0f}MB | Used: {1:.0f}MB | Util {2:3.0f}% | Total {3:.0f}MB".format(gpu.memoryFree,
+																								gpu.memoryUsed,
+																								gpu.memoryUtil * 100,
+																								gpu.memoryTotal))
+
+
 def is_rank_0() -> bool:
 	# Can also use accelerator.is_local_main_process if using Accelerator
 	return int(os.environ.get("RANK", "0")) == 0
@@ -130,100 +151,6 @@ def set_dist(args):
 
 def set_seed(args):
 	"""set random seed."""
-	random.seed(args.seed)
-	np.random.seed(args.seed)
-	torch.manual_seed(args.seed)
-	if args.n_gpu > 0:
-		torch.cuda.manual_seed_all(args.seed)
+	set_seed(args.seed)
 
 
-def save_predictions_mbxp_format(
-		args,
-		output,
-		lang='python',
-		d_type='MBPP',
-		lib_size=None
-):
-	"""
-	Save the predictions in the format required by the MBXP evaluation script.
-	:param args:
-	:param output:
-	:param lang:
-	:param d_type:
-	:return:
-	"""
-	
-	if args.do_peft and lib_size is not None:
-		# Save each library's predictions in a separate file
-		for k in range(lib_size):
-			with open(os.path.join(args.log_dir, f'mbxp_solutions_lib_{k}.json'), 'w') as file:
-				for problem in output:
-					for response in output[problem][f'lib_{k}']:
-						result_dict: dict = {
-							"task_id": problem,
-							"language": lang,
-							"completion": response,
-							"data_type": d_type
-						}
-						file.write(json.dumps(result_dict) + '\n')
-			
-			logger.info(f"Saved predictions for library {k} in the format required by the MBXP evaluation script")
-	
-	# Flatten all the predictions in a single file
-	with open(os.path.join(args.log_dir, f'mbxp_solutions.json'), 'w') as file:
-		for problem in output:
-			if args.do_peft and lib_size is not None:
-				for k in range(lib_size):
-					for response in output[problem][f'lib_{k}']:
-						result_dict: dict = {
-							"task_id": problem,
-							"language": lang,
-							"completion": response,
-							"data_type": d_type
-						}
-						file.write(json.dumps(result_dict) + '\n')
-			else:
-				for response in output[problem]:
-					result_dict: dict = {
-						"task_id": problem,
-						"language": lang,
-						"completion": response,
-						"data_type": d_type
-					}
-					file.write(json.dumps(result_dict) + '\n')
-	
-	logger.info(f"Saved all predictions in a single file in the format required by the MBXP evaluation script")
-
-
-def save_best_lib_predictions_mbxp_format(
-		args,
-		output: Dict[str, Dict[str, List[str]]],
-		lib_mapping: Dict[str, int],
-		lang='python',
-		d_type='MBPP'
-):
-	"""
-	Save the predictions in the format required by the MBXP evaluation script.
-	:param args:
-	:param output:
-	:param lib_mapping:
-	:param lang:
-	:param d_type:
-	:return:
-	"""
-	
-	# Flatten all the predictions in a single file
-	with open(os.path.join(args.log_dir, f'mbxp_solutions_best_lib.json'), 'w') as file:
-		for problem in output:
-			k = lib_mapping[problem]
-			for response in output[problem][f'lib_{k}']:
-				result_dict: dict = {
-					"task_id": problem,
-					"language": lang,
-					"completion": response,
-					"library": f"lib_{k}",
-					"data_type": d_type
-				}
-				file.write(json.dumps(result_dict) + '\n')
-	
-	logger.info(f"Saved best lib predictions in a single file in the format required by the MBXP evaluation script")

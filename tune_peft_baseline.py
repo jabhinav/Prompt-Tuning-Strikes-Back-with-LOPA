@@ -1,4 +1,3 @@
-import math
 import os
 import time
 
@@ -8,31 +7,16 @@ from accelerate import DistributedDataParallelKwargs
 from accelerate.logging import MultiProcessAdapter
 from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration
-from torch.nn import functional as F
 from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
 from transformers import get_constant_schedule_with_warmup
 
-import logging
-from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftMultiModel
+from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftModel
 from utils.config import get_config
-from utils.custom import log_dist, is_rank_0
-from utils.data import MBPP_Dataset_w_CodeBERT as CustomDataset
-from utils.model import ClarificationCodeBERTPredictor
+from utils.custom import is_rank_0
+from utils.data import MBPP_Dataset_wEnc as CustomDataset
 from utils.xformer import load_base_model
 from utils.xformer import load_tokenizer, get_huggingface_path
-
-
-class PromptEmbedding(torch.nn.Module):
-	def __init__(self, config):
-		super().__init__()
-		total_virtual_tokens = config.num_virtual_tokens * config.num_transformer_submodules
-		self.embedding = torch.nn.Embedding(total_virtual_tokens, config.token_dim)
-	
-	def forward(self, indices):
-		# Just get embeddings
-		prompt_embeddings = self.embedding(indices)
-		return prompt_embeddings
 
 
 class Trainer(object):
@@ -64,7 +48,10 @@ class Trainer(object):
 		self.curr_temp = 1.0
 		
 		# setup tokenizer
+		logger.info(f"Loading Dec tokenizer from {get_huggingface_path(args.model_type)}")
 		self.tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
+		logger.info(f"Loading Enc tokenizer from {get_huggingface_path(args.enc_model_type)}")
+		self.enc_tokenizer = load_tokenizer(args.enc_model_type, get_huggingface_path(args.enc_model_type))
 		
 		# setup data_loader
 		with self.accelerator.main_process_first():
@@ -78,27 +65,12 @@ class Trainer(object):
 		with self.accelerator.main_process_first():
 			self.logger.info("Building model...")
 			start = time.monotonic_ns()
-			
-			# Get the decoder PEFT config
-			self.peft_config = PromptTuningConfig(
-				task_type=TaskType.CCVAE_CAUSAL_LM,
-				prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
-				num_virtual_tokens=args.num_virtual_tokens,
-			)
-			
-			# Build VAE model
 			self.model = self._build_model()
-
 			end = time.monotonic_ns()
 			self.logger.debug(self.model)
 			self.logger.info(f"Building model done in {(end - start) / 1e6:.2f}ms")
-			
 			# Print the number of trainable parameters
-			enc_trainable_params, enc_all_params, dec_trainable_params, dec_all_params = self.__count_parameters(
-				self.model)
-			msg = (f"Encoder: trainable params: {enc_trainable_params:,d} || all params: {enc_all_params:,d} ||"
-				   f" trainable%: {100 * enc_trainable_params / enc_all_params}")
-			self.logger.info(msg)
+			dec_trainable_params, dec_all_params = self.__count_parameters(self.model)
 			msg = (f"Decoder: trainable params: {dec_trainable_params:,d} || all params: {dec_all_params:,d} ||"
 				   f" trainable%: {100 * dec_trainable_params / dec_all_params}")
 			self.logger.info(msg)
@@ -123,49 +95,7 @@ class Trainer(object):
 		
 		# save config file path
 		self.config_save_path = os.path.join(self.args.log_dir, "args.json")
-		
-	def init_clf_embeddings(self):
-		"""
-		Initialize the embeddings for the library of clarifications.
-		:return:
-		"""
-		
-		clf_lib = torch.nn.ModuleDict({})
-		clf_tokens = {}
-		
-		for k in range(self.args.num_libraries):
-			prompt_encoder = PromptEmbedding(self.peft_config)
-			prompt_encoder = prompt_encoder.to(self.device)
-			clf_lib.update(torch.nn.ModuleDict({f'{k}': prompt_encoder}))
-			
-			clf_tokens[f'{k}'] = torch.arange(
-				self.peft_config.num_virtual_tokens * self.peft_config.num_transformer_submodules
-			).long()
-	
-		return clf_lib, clf_tokens
-	
-	def init_encoder(self):
-		"""
-		Initialize the encoder.
-		"""
-		args = self.args
-		model = ClarificationCodeBERTPredictor(args=args, output_dim=args.num_libraries)
-		
-		if args.clf_predictor_path is not None:
-			# Load the model state dict on the CPU to avoid an OOM error.
-			loaded_state_dict = torch.load(args.clf_predictor_path, map_location="cpu")
-			loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
-			model.load_state_dict(loaded_state_dict, strict=True)
-			
-			# release memory
-			del loaded_state_dict
-			
-			# Log the loaded checkpoint
-			msg = "Loaded encoder checkpoint from path: {}".format(args.clf_predictor_path)
-			if is_rank_0():
-				print(msg)
-		
-		return model
+		self.device = self.accelerator.device
 	
 	def init_decoder(self):
 		"""
@@ -198,55 +128,53 @@ class Trainer(object):
 			if is_rank_0():
 				print(msg)
 		
+		# Get the config
+		peft_config = PromptTuningConfig(
+			task_type=TaskType.CAUSAL_LM,
+			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
+			num_virtual_tokens=args.num_virtual_tokens,
+		)
+		
 		if args.load_adapter_from is not None:
 			# Load the model adapters - in place
-			model = PeftMultiModel.from_pretrained(
+			model = PeftModel.from_pretrained(
 				model=model,
 				model_id=args.load_adapter_from,  # Must be a directory containing the model files
-				config=self.peft_config,
+				config=peft_config,
 			)
 			msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
 			if is_rank_0():
 				print(msg)
 		else:
 			# Initialize the model adapters
-			model = get_peft_model(model, self.peft_config)
+			model = get_peft_model(model, peft_config)
+		
+		# This should match dimensions of torch.nn.Embedding(total_virtual_tokens, config.token_dim)
+		self.args.total_virtual_tokens = self.args.num_virtual_tokens * peft_config.num_transformer_submodules
+		self.args.word_embedding_dim = peft_config.token_dim
 		
 		return model
 	
 	def _build_model(self):
 		
 		model = {
-			"enc": self.init_encoder(),
-			"dec": self.init_decoder()
+			"dec": self.init_decoder(),  # First init the decoder to set eff. num virtual tokens and word embedding dim
 		}
-		
-		# Initialize the classifier embeddings
-		clf_lib, clf_tokens = self.init_clf_embeddings()
-		
-		# Set the classifier embeddings
-		model['clf_lib'] = clf_lib
-		model['clf_tokens'] = clf_tokens
 		
 		return model
 	
 	def _build_optimizer(self):
-		optimizer_e = torch.optim.AdamW(self.model['enc'].parameters(), lr=self.args.lr)
-		optimizer_d = torch.optim.AdamW(self.model['dec'].parameters(), lr=self.args.lr)
-		return {"optimizer_enc": optimizer_e, "optimizer_dec": optimizer_d}
+		optimizer_d = torch.optim.AdamW(self.model['dec'].parameters(), lr=self.args.dec_lr)
+		return {"optimizer_dec": optimizer_d}
 	
 	def _build_scheduler(self):
 		# Get the learning rate scheduler
-		scheduler_e = get_constant_schedule_with_warmup(
-			optimizer=self.optimizer['optimizer_enc'],
-			num_warmup_steps=0,
-		)
 		scheduler_d = get_constant_schedule_with_warmup(
 			optimizer=self.optimizer['optimizer_dec'],
 			num_warmup_steps=0,
 		)
 		
-		return {"scheduler_enc": scheduler_e, "scheduler_dec": scheduler_d}
+		return {"scheduler_dec": scheduler_d}
 	
 	def _build_dataloader(self):
 		# Get the dataset
@@ -256,7 +184,8 @@ class Trainer(object):
 			max_prompt_length=self.args.max_prompt_length,
 			max_length=self.args.max_length,
 			sample_problems=self.args.num_train_problems,
-			mode='train'
+			mode='train',
+			enc_tokenizer=self.enc_tokenizer,
 		)
 		
 		self.args.batch_size = self.args.per_gpu_train_batch_size * max(1, self.args.n_gpu)
@@ -295,12 +224,8 @@ class Trainer(object):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": "cVAE"}}
+				init_kwargs={"wandb": {"name": "PEFT"}}
 			)
-		
-		# Set the device
-		self.device = self.accelerator.device
-
 	
 	def _ds_prepare(self):
 		# [TO AVOID] You must specify a training or evaluation dataloader in accelerate.prepare() when using DeepSpeed
@@ -332,134 +257,48 @@ class Trainer(object):
 	
 	@staticmethod
 	def __count_parameters(model):
-		enc_trainable_params = sum(p.numel() for p in model['enc'].parameters() if p.requires_grad)
-		enc_all_params = sum(p.numel() for p in model['enc'].parameters())
 		dec_trainable_params, dec_all_params = model['dec'].get_nb_trainable_parameters()
-		return enc_trainable_params, enc_all_params, dec_trainable_params, dec_all_params
+		return dec_trainable_params, dec_all_params
 	
-	@staticmethod
-	def gumbel_softmax(logits, temperature=1.0, eps=1e-20):
-		"""
-		See: https://gist.github.com/yzh119/fd2146d2aeb329d067568a493b20172f
-		"""
-		U = torch.rand_like(logits)
-		gumbel = -torch.log(-torch.log(U + eps) + eps)
-		y = logits + gumbel
-		return F.softmax(y / temperature, dim=-1)
-	
-	def set_gumbel_temp(self, min_temp: float = 0.5, decay_rate: float = 2e-3, update_every: int = 50):
-		
-		if self.step % update_every == 0:
-			# Decay the temperature according to max(min_temp, exp(-decay_rate * step))
-			curr_temp = max(min_temp, math.exp(-decay_rate * self.step))
-			self.curr_temp = curr_temp
-	
-	@staticmethod
-	def logprobs_from_logits(logits, labels):
-		"""
-		See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
-		"""
-		log_p = F.log_softmax(logits, dim=2)
-		logpy = torch.gather(log_p, 2, labels.unsqueeze(2)).squeeze(-1)
-		return logpy
-	
-	def get_response_log_probs(self, batch, tokenizer, model, latent_prompt):
+	def get_reconstruction_loss(self, batch, model):
 		prompt, prompt_mask, response, response_mask = batch
-		batch_size = prompt.size(0)
 		
-		resp_logits = model(
-			latent_prompts=latent_prompt,
+		# # Set the library index
+		# print("[Debug] Library Index:", library_idx)
+		# model.library_idx = library_idx
+		# print("[Debug] Model Library Index:", model.library_idx)
+		
+		output = model(
 			input_ids=prompt,
 			attention_mask=prompt_mask,
 			labels=response,
 			output_hidden_states=True
-		)['logits']
+		)
 		
-		# # Prepare the response mask for the complete response (including for the latent prompt)
-		# Append response_mask with 0s for the latent prompt (this is not the mask for attending to latent prompt)
-		response_prefix_mask = torch.zeros((batch_size, self.args.total_virtual_tokens)).to(response_mask.device)
-		response_mask = torch.cat((response_prefix_mask, response_mask), dim=1)
-		
-		# # Prepare labels for the complete response (including for the latent prompt)
-		# Append labels [=-100] for the latent prompt to the response
-		response_prefix = torch.full((batch_size, self.args.total_virtual_tokens), -100).to(response.device)
-		response = torch.cat((response_prefix, response), dim=1)
-		response[response == -100] = tokenizer.pad_token_id  # Replace -100 with pad_token_id
-		resp_labels = response.contiguous()
-		
-		# # Compute the log-probability of the response tokens
-		resp_log_prob = self.logprobs_from_logits(resp_logits, resp_labels)
-		resp_log_prob *= response_mask
-		
-		# Likelihood of the sample coming from the latent prompt of library k
-		resp_log_prob = resp_log_prob.sum(dim=1)
-		
-		return resp_log_prob
+		return output.loss
 	
 	def _train_step(self, batch):
 		r"""Forward step for training and inference. This function is called
 		in ``_train_step`` & ``_test_step`` function.
 		"""
-		# Encode
-		att_logits = self.model["enc"](*batch[:2])
-		
-		# Sample using Gumbel Softmax
-		# self.set_gumbel_temp()
-		att_weights = self.gumbel_softmax(att_logits, temperature=self.curr_temp)
-		
-		# Expand the attention weights to the shape of the clarifications i.e. [batch_size, num_libraries, 1, 1]
-		att_weights = att_weights.unsqueeze(-1)
-		att_weights = att_weights.unsqueeze(-1)
-		
-		# Get each clarification, weigh it with the attention weights and sum them up
-		all_clarifications = []
-		for k in range(self.args.num_libraries):
-			clf_encoder = self.model['clf_lib'][f'{k}']
-			clf_tokens = (
-				self.model['clf_lib'][f'{k}']
-				.unsqueeze(0)
-				.expand(att_weights.size(0), -1)
-				.to(clf_encoder.embedding.weight.device)
-			)
-			clf = clf_encoder(clf_tokens)
-			clf = clf.unsqueeze(1)
-			all_clarifications.append(clf)
-			
-		# Weigh the clarifications with the attention weights
-		all_clarifications = torch.stack(all_clarifications, dim=1)
-		weighted_clarification = all_clarifications * att_weights
-		weighted_clarification = weighted_clarification.sum(dim=1)
-		
-		# Decode: Multiply att_weights by the log probability of the response for corresponding k
-		resp_log_prob = self.get_response_log_probs(
+		# Loss function = -log(p(x|z))
+		reconstruction_loss = self.get_reconstruction_loss(
 			batch[2:],
-			self.tokenizer,
 			self.model["dec"],
-			latent_prompt=weighted_clarification,
 		)
 		
-		# Loss function = -log(p(x|z))
-		reconstruction_loss = -resp_log_prob.mean()
-		
-		# KL Divergence = KL(q(z|x) || p(z))
-		kl_div = torch.sum(att_weights * torch.log(att_weights * self.args.num_libraries + 1e-8), dim=-1).mean()
-		
 		# Total loss
-		total_loss = reconstruction_loss + self.args.kl_coeff * kl_div
+		total_loss = reconstruction_loss
 		
 		# BP and Grad Updated
-		self.optimizer["optimizer_enc"].zero_grad()
 		self.optimizer["optimizer_dec"].zero_grad()
 		self.accelerator.backward(total_loss)
-		self.optimizer["optimizer_enc"].step()
 		self.optimizer["optimizer_dec"].step()
 		
 		return {
 			f"total_loss": total_loss.detach().cpu().numpy().item(),
 			f"reconstruction_loss": reconstruction_loss.detach().cpu().numpy().item(),
-			f"kl_div": kl_div.detach().cpu().numpy().item(),
 		}, {
-			f"gumbel_temp": self.curr_temp,
 		}
 	
 	def _train_epoch(self):
@@ -468,7 +307,6 @@ class Trainer(object):
 		"""
 		
 		# Set the models to train mode
-		self.model["enc"].train()
 		self.model["dec"].train()
 		
 		epoch_losses: dict = {}
@@ -501,11 +339,6 @@ class Trainer(object):
 						{
 							"Step/Total Loss": train_losses["total_loss"],
 							"Step/Reconstruction Loss": train_losses["reconstruction_loss"],
-							"Step/KL Divergence": train_losses["kl_div"],
-							"Step/Gumbel Temperature": train_stats["gumbel_temp"],
-							"Step/Encoder Learning Rate": self.optimizer[
-								"optimizer_enc"
-							].param_groups[0]["lr"],
 							"Step/Decoder Learning Rate": self.optimizer[
 								"optimizer_dec"
 							].param_groups[0]["lr"],
@@ -524,45 +357,6 @@ class Trainer(object):
 			)
 		
 		return epoch_losses
-	
-	@torch.no_grad()
-	def eval_epoch(self):
-		
-		# Set the models to eval mode
-		self.model["enc"].eval()
-		self.model["dec"].eval()
-		
-		# Create a file to save the attention weights
-		with open(os.path.join(self.args.log_dir, f"attention_weights_{self.epoch}.txt"), "w") as f:
-			# We only need to save the attention weights for each training sample
-			batch_count = 0
-			for batch in tqdm(
-					self.train_dataloader,
-					desc=f"Evaluating Epoch {self.epoch}",
-					unit="batch",
-					colour="GREEN",
-					leave=False,
-					dynamic_ncols=True,
-					smoothing=0.04,
-					disable=not self.accelerator.is_main_process,
-			):
-				f.write("-" * 32 + "\n")
-				f.write("Batch {}: \n".format(batch_count))
-				
-				# Encode
-				clf_logits = self.model["enc"](*batch[:2])
-				tok_dist = torch.nn.functional.softmax(clf_logits, dim=-1)
-				
-				# Sampled using Gumbel Softmax
-				sampled = self.gumbel_softmax(clf_logits, temperature=0.2)
-				
-				# Log the attention weights. Round to 4 decimal places
-				tok_dist = torch.round(tok_dist * 1e4) / 1e4
-				sampled = torch.round(sampled * 1e4) / 1e4
-				f.write("[Predicted] Attention weights:\n {}\n".format(tok_dist.detach().cpu().numpy()))
-				f.write("[Sampled] Attention weights:\n {}\n".format(sampled.detach().cpu().numpy()))
-				
-				batch_count += 1
 	
 	def train_loop(self):
 		r"""Training loop. The public entry of training process."""
@@ -586,34 +380,38 @@ class Trainer(object):
 							step=self.step,
 						)
 			
-			# Do evaluation epoch
-			self.eval_epoch()
-			
 			# Update info for each epoch
 			self.epoch += 1
+			
+			if self.epoch % self.args.save_every == 0:
+				self.accelerator.wait_for_everyone()
+				if self.accelerator.is_main_process:
+					self.save(f"epoch_{self.epoch}")
 		
 		# Finish training and save final checkpoint
 		self.accelerator.wait_for_everyone()
 		if self.accelerator.is_main_process:
 			# self.accelerator.save_state(os.path.join(self.args.log_dir, "final_epoch"))
-			self.save()
+			self.save("final")
 		
 		self.accelerator.end_training()
 	
-	def save(self):
+	def save(self, dir_tag: str):
 		
-		# Save Encoder
-		enc = self.accelerator.unwrap_model(self.model['enc'])
-		torch.save(enc.state_dict(), os.path.join(self.args.log_dir, "clf_predictor.pt"))
+		# Create a directory to save the model
+		save_at = os.path.join(self.args.log_dir, dir_tag)
+		if not os.path.exists(save_at):
+			os.makedirs(save_at)
 		
 		# Save Decoder
 		dec = self.accelerator.unwrap_model(self.model['dec'])
 		dec.save_pretrained(
-			save_directory=self.args.save_at)  # In place of $ accelerator.save(model.state_dict(), path)
+			save_directory=os.path.join(save_at, "PEFT"),
+			is_main_process=is_rank_0(),
+		)
 		
 		if is_rank_0():
-			print("Saved the Decoder model at:", self.args.save_at)
-			print("Saved the Encoder model at:", os.path.join(self.args.log_dir, "clf_predictor.pt"))
+			print("Saved the Decoder model at:", os.path.join(save_at, "PEFT"))
 
 
 def main():
@@ -623,14 +421,9 @@ def main():
 	
 	# Add custom args
 	args.gradient_accumulation_steps = 1
-	
+
 	# Add BERT specific args
-	args.bert_model_type = "codebert-base"
-	args.bert_tokenizer_name = get_huggingface_path(args.bert_model_type)
-	args.bert_model_name_or_path = get_huggingface_path(args.bert_model_type)
-	args.bert_config_name = get_huggingface_path(args.bert_model_type)
-	msg = f"Added model specific args for {args.bert_model_type}"
-	log_dist(message=msg, level=logging.INFO, ranks=[0])
+	args.enc_model_type = "codebert-base"  # Won't be used in this script
 	
 	trainer = Trainer(args, logger)
 	trainer.train_loop()

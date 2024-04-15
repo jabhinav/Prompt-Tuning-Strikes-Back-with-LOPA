@@ -29,20 +29,9 @@ from .peft_model import (
     PeftModelForSequenceClassification,
     PeftModelForTokenClassification,
 )
-from .my_peft_lib_model import (
-    PeftMultiModel,
-    PeftMultiModelForCausalLM,
-)
 
-from .my_peft_cvae_model import (
-    PeftCvaeModel,
-    PeftCvaeModelForCausalLM,
-)
-
-from .my_peft_ccvae_model import (
-    PeftCcvaeModel,
-    PeftCcvaeModelForCausalLM,
-)
+from .my_peft_cvae_model import PeftCvaeModel, PeftCvaeModelForCausalLM
+from .peft_idpg_baseline_model import PeftIDPGModel, PeftIDPGModelForCausalLM
 
 from .tuners import (
     AdaLoraConfig,
@@ -67,9 +56,8 @@ MODEL_TYPE_TO_PEFT_MODEL_MAPPING = {
     "SEQ_CLS": PeftModelForSequenceClassification,
     "SEQ_2_SEQ_LM": PeftModelForSeq2SeqLM,
     "CAUSAL_LM": PeftModelForCausalLM,
-    "MULTI_CAUSAL_LM": PeftMultiModelForCausalLM,
     "CVAE_CAUSAL_LM": PeftCvaeModelForCausalLM,
-    "CCVAE_CAUSAL_LM": PeftCcvaeModelForCausalLM,
+    "IDPG_CAUSAL_LM": PeftIDPGModelForCausalLM,
     "TOKEN_CLS": PeftModelForTokenClassification,
     "QUESTION_ANS": PeftModelForQuestionAnswering,
     "FEATURE_EXTRACTION": PeftModelForFeatureExtraction,

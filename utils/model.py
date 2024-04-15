@@ -1,233 +1,6 @@
-import os
-from typing import Tuple
-
 import torch
-from torch.nn import functional as F
 
-from utils.xformer import load_base_model
-from utils.custom import is_rank_0
-from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftMultiModel
-
-
-class ClarificationMLPPredictor(torch.nn.Module):
-	def __init__(self, input_dim: int, output_dim: int):
-		super(ClarificationMLPPredictor, self).__init__()
-		self.input_dim = input_dim
-		self.output_dim = output_dim
-		self.fc1 = torch.nn.Linear(self.input_dim, 1024)
-		self.fc2 = torch.nn.Linear(1024, 512)
-		self.fc3 = torch.nn.Linear(512, 256)
-		self.fc4 = torch.nn.Linear(256, self.output_dim)
-
-	def forward(self, prompt_embedding: torch.Tensor) -> torch.Tensor:
-		"""
-		:param prompt_embedding: Tensor of shape (batch_size, input_dim)
-		:return: Tensor of shape (batch_size, output_dim)
-		"""
-		x = torch.nn.functional.relu(self.fc1(prompt_embedding))
-		x = torch.nn.functional.relu(self.fc2(x))
-		x = torch.nn.functional.relu(self.fc3(x))
-		x = self.fc4(x)  # Logits
-		x = torch.nn.functional.softmax(x, dim=1)  # Probabilities
-		return x
-
-	def predict(self, prompt_embedding: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-		"""
-		:param prompt_embedding: Tensor of shape (batch_size, input_dim)
-		:return: Tuple of (probabilities, indices)
-		"""
-		probabilities = self.forward(prompt_embedding)
-		indices = torch.argmax(probabilities, dim=1)
-		return probabilities, indices
-
-
-class ClarificationCodeBERTPredictor(torch.nn.Module):
-	def __init__(self, args, output_dim):
-		super(ClarificationCodeBERTPredictor, self).__init__()
-		
-		config, base = load_base_model(
-			model_type=args.bert_model_type,
-			config_name=args.bert_config_name,
-			model_path=args.bert_model_name_or_path,
-		)
-		self.config = config
-		self.base = base  # CodeBERT model
-		
-		# Classifier head
-		self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
-		self.dense = torch.nn.Linear(config.hidden_size, config.hidden_size)
-		self.out_proj = torch.nn.Linear(config.hidden_size, output_dim)
-		self.init_predictor_head()
-	
-	def init_predictor_head(self):
-		# Initialize the weights
-		self.dense.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-		self.out_proj.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-		self.out_proj.bias.data.zero_()
-	
-	def forward(self, input_ids, attention_mask):
-		x = self.base(input_ids, attention_mask=attention_mask)
-		x = x[0][:, 0, :]  # Get the CLS token embedding
-		# x = x.pooler_output  # Get the pooled output
-		x = self.dropout(x)
-		x = self.dense(x)
-		x = torch.nn.functional.tanh(x)
-		x = self.dropout(x)
-		x = self.out_proj(x)
-		return x
-	
-	# def predict(self, input_ids, attention_mask):
-	# 	if self.return_logits:
-	# 		logits = self.forward(input_ids, attention_mask)
-	# 		probabilities = torch.nn.functional.softmax(logits, dim=-1)
-	# 	else:
-	# 		probabilities = self.forward(input_ids, attention_mask)
-	# 	indices = torch.argmax(probabilities, dim=1)
-	# 	return probabilities, indices
-
-
-def logprobs_from_logits(logits, labels):
-	"""
-	See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
-	"""
-	log_p = F.log_softmax(logits, dim=2)
-	logpy = torch.gather(log_p, 2, labels.unsqueeze(2)).squeeze(-1)
-	return logpy
-
-
-def get_response_log_probs_for_lib(args, batch, tokenizer, model, library_idx):
-	prompt, prompt_mask, response, response_mask = batch
-	batch_size = prompt.size(0)
-	
-	# # Set the library index
-	# print("[Debug] Library Index:", library_idx)
-	# model.library_idx = library_idx
-	# print("[Debug] Model Library Index:", model.library_idx)
-	
-	resp_logits = model(
-		library_idx=library_idx,
-		input_ids=prompt,
-		attention_mask=prompt_mask,
-		labels=response,
-		output_hidden_states=True
-	)['logits']
-	
-	# # Prepare the response mask for the complete response (including for the latent prompt)
-	# Append response_mask with 0s for the latent prompt (this is not the mask for attending to latent prompt)
-	response_prefix_mask = torch.zeros((batch_size, args.num_virtual_tokens)).to(response_mask.device)
-	response_mask = torch.cat((response_prefix_mask, response_mask), dim=1)
-	
-	# # Prepare labels for the complete response (including for the latent prompt)
-	# Append labels [=-100] for the latent prompt to the response
-	response_prefix = torch.full((batch_size, args.num_virtual_tokens), -100).to(response.device)
-	response = torch.cat((response_prefix, response), dim=1)
-	response[response == -100] = tokenizer.pad_token_id  # Replace -100 with pad_token_id
-	resp_labels = response.contiguous()
-	
-	# # Compute the log-probability of the response tokens
-	resp_log_prob = logprobs_from_logits(resp_logits, resp_labels)
-	resp_log_prob = resp_log_prob * response_mask
-	
-	# Likelihood of the sample coming from the latent prompt of library k
-	resp_log_prob = resp_log_prob.sum(dim=1)
-	
-	return resp_log_prob
-
-
-def get_response_log_probs_for_cVAE(args, batch, tokenizer, model, latent_attention_weights):
-	prompt, prompt_mask, response, response_mask = batch
-	batch_size = prompt.size(0)
-	
-	# # Set the library index
-	# print("[Debug] Library Index:", library_idx)
-	# model.library_idx = library_idx
-	# print("[Debug] Model Library Index:", model.library_idx)
-	
-	resp_logits = model(
-		latent_attention_weights=latent_attention_weights,
-		input_ids=prompt,
-		attention_mask=prompt_mask,
-		labels=response,
-		output_hidden_states=True
-	)['logits']
-	
-	# # Prepare the response mask for the complete response (including for the latent prompt)
-	# Append response_mask with 0s for the latent prompt (this is not the mask for attending to latent prompt)
-	response_prefix_mask = torch.zeros((batch_size, args.num_virtual_tokens)).to(response_mask.device)
-	response_mask = torch.cat((response_prefix_mask, response_mask), dim=1)
-	
-	# # Prepare labels for the complete response (including for the latent prompt)
-	# Append labels [=-100] for the latent prompt to the response
-	response_prefix = torch.full((batch_size, args.num_virtual_tokens), -100).to(response.device)
-	response = torch.cat((response_prefix, response), dim=1)
-	response[response == -100] = tokenizer.pad_token_id  # Replace -100 with pad_token_id
-	resp_labels = response.contiguous()
-	
-	# # Compute the log-probability of the response tokens
-	resp_log_prob = logprobs_from_logits(resp_logits, resp_labels)
-	resp_log_prob = resp_log_prob * response_mask
-	
-	# Likelihood of the sample coming from the latent prompt of library k
-	resp_log_prob = resp_log_prob.sum(dim=1)
-	
-	return resp_log_prob
-
-
-@torch.no_grad()
-def compute_responsibilities(args, batch, tokenizer, model, prior: ClarificationCodeBERTPredictor = None) -> torch.Tensor:
-	"""
-	Compute the responsibilities i.e. posterior probabilities of the sample coming from the latent prompt of each
-	library.
-	:param args:
-	:param batch: (prompt_embed, prompt, prompt_mask, response, response_mask)
-	:param tokenizer:
-	:param model:
-	:param prior:
-	:return:
-	"""
-	
-	batch_size = batch[0].size(0)
-	if len(batch) == 6:  # Do not use the prior as indicative of whether additional prompt is present
-		prior_prompt, prior_prompt_mask, prompt, prompt_mask, response, response_mask = batch
-	else:
-		prompt, prompt_mask, response, response_mask = batch
-		prior_prompt, prior_prompt_mask = None, None
-	
-	# Create a tensor of shape (n_samples, num_libraries) to store the responsibilities
-	likelihood = torch.zeros((batch_size, args.num_libraries)).to(args.device)
-	
-	for k in range(args.num_libraries):
-		# Store the likelihood of the sample coming from the latent prompt of library k
-		likelihood[:, k] = get_response_log_probs_for_lib(
-			args,
-			(prompt, prompt_mask, response, response_mask),
-			tokenizer,
-			model,
-			k
-		)
-	
-	if prior is None:
-		# Compute the responsibilities (prior is uniform, thus cancelled out)
-		responsibilities = F.softmax(likelihood, dim=1)
-	else:
-		# Compute the prior probabilities
-		clf_logits = prior(prior_prompt, prior_prompt_mask)
-		log_prior = torch.nn.functional.log_softmax(clf_logits, dim=1)
-		log_prior = log_prior.to(args.device)
-		
-		# Add the log_prior to the likelihood
-		full_likelihood = likelihood + log_prior
-		
-		# Compute the responsibilities
-		responsibilities = F.softmax(full_likelihood, dim=1)
-	
-	# To prevent underflow, clip the responsibilities to a minimum value
-	responsibilities = responsibilities.clamp(min=1e-8)
-	
-	responsibilities = responsibilities.detach()
-	
-	responsibilities.to(args.device)
-	return responsibilities
+from utils.xformer import load_base_model, get_huggingface_path
 
 
 def compute_grad_norm(model):
@@ -265,170 +38,214 @@ def get_clf_embedding(args, model, prompt, prompt_mask, response, library_idx):
 	)['hidden_states'][-1]
 	
 	# Last virtual token embedding (this won't change no matter the prompt)
-	embedding = clf_embedding[:, args.num_virtual_tokens-1, :]
+	embedding = clf_embedding[:, args.num_virtual_tokens - 1, :]
 	
 	return embedding
-	
-
-def gumbel_softmax(logits, temperature=1.0, eps=1e-20):
-	"""
-	See: https://gist.github.com/yzh119/fd2146d2aeb329d067568a493b20172f
-	"""
-	U = torch.rand_like(logits)
-	gumbel = -torch.log(-torch.log(U + eps) + eps)
-	y = logits + gumbel
-	return F.softmax(y / temperature, dim=-1)
 
 
-class Lib_cVAE(torch.nn.Module):
-	def __init__(self, args, tokenizer):
-		super(Lib_cVAE, self).__init__()
+class PromptSpecificClarificationEncoder(torch.nn.Module):
+	def __init__(self, args, n_virtual_tokens, word_embedding_dim, freeze_base=False):
+		super(PromptSpecificClarificationEncoder, self).__init__()
 		
+		config, base = load_base_model(
+			model_type=args.enc_model_type,
+			config_name=get_huggingface_path(args.enc_model_type),
+			model_path=get_huggingface_path(args.enc_model_type),
+		)
 		self.args = args
-		self.tokenizer = tokenizer
+		self.config = config
+		self.base = base  # CodeBERT model
+		self.freeze_base = freeze_base
 		
-		# Encoder
-		self.enc = self.init_encoder()
-		self.dec = self.init_decoder()
+		# # Base model does not require any training - freeze the weights
+		if self.freeze_base:
+			for param in self.base.parameters():
+				param.requires_grad = False
 		
+		# For each virtual token, predict a word embedding - mu and logvar
+		self.n_virtual_tokens = n_virtual_tokens
+		self.word_embedding_dim = word_embedding_dim
+		
+		# Set params
+		dropout_prob = config.hidden_dropout_prob if hasattr(config, 'hidden_dropout_prob') else config.dropout_rate if hasattr(config, 'dropout_rate') else 0.1
+		hidden_dim = config.hidden_size if hasattr(config, 'hidden_size') else config.embed_dim if hasattr(config, 'embed_dim') else 768
+		self.config_initializer_range = config.initializer_range if hasattr(config, 'initializer_range') else 0.02
+		
+		# Define the head for encoding the row vectors - weighs virtual tokens
+		self.row_dropout = torch.nn.Dropout(dropout_prob)
+		self.row_dense = torch.nn.Linear(hidden_dim, hidden_dim)
+		self.row_out_proj = torch.nn.Linear(hidden_dim, n_virtual_tokens)
+		
+		# Define the head for encoding the column vectors - weighs the word embedding dimensions
+		self.col_dropout = torch.nn.Dropout(dropout_prob)
+		self.col_dense = torch.nn.Linear(hidden_dim, hidden_dim)
+		self.col_out_proj = torch.nn.Linear(hidden_dim, word_embedding_dim)
+		
+		self.init_predictor_head()
 	
-	def init_encoder(self):
-		"""
-		Initialize the encoder.
-		"""
-		args = self.args
-		model = ClarificationCodeBERTPredictor(args=args, output_dim=args.num_libraries)
+	def init_predictor_head(self):
+		# Initialize the weights for the row head
+		self.row_dense.weight.data.normal_(mean=0.0, std=self.config_initializer_range)
+		self.row_out_proj.weight.data.normal_(mean=0.0, std=self.config_initializer_range)
+		self.row_out_proj.bias.data.zero_()
 		
-		if args.clf_predictor_path is not None:
-			# Load the model state dict on the CPU to avoid an OOM error.
-			loaded_state_dict = torch.load(args.clf_predictor_path, map_location="cpu")
-			loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
-			model.load_state_dict(loaded_state_dict, strict=True)
-			
-			# release memory
-			del loaded_state_dict
-			
-			# Log the loaded checkpoint
-			msg = "Loaded encoder checkpoint from path: {}".format(args.clf_predictor_path)
-			if is_rank_0():
-				print(msg)
-		
-		return model
+		# Initialize the weights for the column head
+		self.col_dense.weight.data.normal_(mean=0.0, std=self.config_initializer_range)
+		self.col_out_proj.weight.data.normal_(mean=0.0, std=self.config_initializer_range)
+		self.col_out_proj.bias.data.zero_()
 	
-	def init_decoder(self):
-		"""
-		Initialize the decoder.
-		:return:
-		"""
+
+	def get_instance_embedding(self, input_ids, attention_mask=None):
 		
-		args = self.args
+		if attention_mask is None:
+			# Attend to all tokens
+			attention_mask = torch.ones_like(input_ids)
+			attention_mask = attention_mask.to(device=input_ids.device)
 		
-		# Get the model
-		_, model = load_base_model(
-			model_type=args.model_type,
-			config_name=args.config_name,
-			model_path=args.model_name_or_path,
-			load_in_8bit=args.load_in_8bit
-		)
+		# Get the CLS token embedding
+		if self.args.enc_model_type == 'codebert-base':
+			x = self.base(input_ids, attention_mask=attention_mask)
+			x = x[0][:, 0, :]
 		
-		# Load checkpoint
-		if args.load_base_from_path is not None:
-			# We load the model state dict on the CPU to avoid an OOM error.
-			loaded_state_dict = torch.load(args.load_base_from_path, map_location="cpu")
-			loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
-			model.load_state_dict(loaded_state_dict, strict=True)
-			
-			# release memory
-			del loaded_state_dict
-			
-			# Log the loaded checkpoint
-			msg = "Loaded decoder base checkpoint from path: {}".format(args.load_base_from_path)
-			if is_rank_0():
-				print(msg)
+		elif self.args.enc_model_type == 'codet5p-110m-embedding':
+			x = self.base(input_ids, attention_mask=attention_mask)
 		
-		# Get the config
-		peft_config = PromptTuningConfig(
-			task_type=TaskType.MULTI_CAUSAL_LM,
-			# CAUSAL_LM, SEQ_2_SEQ_LM for Dec-only, Enc-Dec. MULTI is my custom field.
-			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
-			num_virtual_tokens=args.num_virtual_tokens,
-			# prompt_tuning_init_text="Classify if tweet is a complaint or not:",  # Use this if prompt_tuning_init is TEXT
-			# tokenizer_name_or_path=args.model_name_or_path,  # Use this if prompt_tuning_init is TEXT
-			num_init_clusters=args.num_libraries,  # My custom field
-		)
-		
-		if args.load_adapter_from is not None:
-			# Load the model adapters - in place
-			model = PeftMultiModel.from_pretrained(
-				model=model,
-				model_id=args.load_adapter_from,  # Must be a directory containing the model files
-				config=peft_config,
-			)
-			msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
-			if is_rank_0():
-				print(msg)
 		else:
-			# Initialize the model adapters
-			model = get_peft_model(model, peft_config)
+			x = self.base(
+				input_ids=input_ids,
+				attention_mask=attention_mask,
+				labels=input_ids,
+				output_hidden_states=True
+			)['hidden_states'][-1]
+			
+			# Last token embedding
+			x = x[:, -1, :]
 		
-		return model
+		return x
 	
-	def get_nb_trainable_parameters(self):
+	def forward(self, input_ids, attention_mask=None):
 		
-		enc_trainable_params = sum(p.numel() for p in self.enc.parameters() if p.requires_grad)
-		enc_all_params = sum(p.numel() for p in self.enc.parameters())
-		dec_trainable_params, dec_all_params = self.dec.get_nb_trainable_parameters()
+		if self.freeze_base:
+			with torch.no_grad():
+				# Get the instance embedding
+				x = self.get_instance_embedding(input_ids, attention_mask)
+				x = x.detach()
 		
-		return enc_trainable_params, enc_all_params, dec_trainable_params, dec_all_params
+		else:
+			# Get the instance embedding
+			x = self.get_instance_embedding(input_ids, attention_mask)
 		
-	def encode(self, input_ids, attention_mask):
-		clf_logits = self.enc(input_ids, attention_mask=attention_mask)
-		return clf_logits
+		# Predict the row weights
+		row_weights = self.row_dropout(x)
+		row_weights = self.row_dense(row_weights)
+		row_weights = torch.nn.functional.tanh(row_weights)
+		row_weights = self.row_out_proj(row_weights)
+		
+		# Predict the column weights
+		col_weights = self.col_dropout(x)
+		col_weights = self.col_dense(col_weights)
+		col_weights = torch.nn.functional.tanh(col_weights)
+		col_weights = self.col_out_proj(col_weights)
+		
+		# Multiply: uk ∈ R^l, vk ∈ R^d -> uk * vk^T ∈ R^(l x d)
+		prompt_specific_clf_embedding = torch.einsum('bi,bj->bij', row_weights, col_weights)
+		
+		return prompt_specific_clf_embedding
 	
-	def decode(self, batch, k):
-		resp_log_prob = get_response_log_probs_for_lib(
-			self.args,
-			batch,
-			self.tokenizer,
-			self.dec,
-			k
+	def __str__(self):
+		return f"MyEncoder/{self.args.enc_model_type}"
+	
+	def __repr__(self):
+		return f"MyEncoder/{self.args.enc_model_type}"
+
+
+class IDPGPromptEncoder(torch.nn.Module):
+	def __init__(self, args, n_virtual_tokens, word_embedding_dim):
+		super(IDPGPromptEncoder, self).__init__()
+		
+		# In IDPG, the encoder is the same as the decoder
+		config, base = load_base_model(
+			model_type=args.enc_model_type,
+			config_name=get_huggingface_path(args.enc_model_type),
+			model_path=get_huggingface_path(args.enc_model_type),
 		)
-		return resp_log_prob
+		self.args = args
+		self.config = config
+		self.base = base  # Could be any model
+		
+		# Base model does not require any training - freeze the weights
+		for param in self.base.parameters():
+			param.requires_grad = False
+		
+		# For each virtual token, predict a word embedding - mu and logvar
+		self.n_virtual_tokens = n_virtual_tokens
+		self.word_embedding_dim = word_embedding_dim
+		
+		# Set params [Should be same as the model used for the base]
+		dropout_prob = config.hidden_dropout_prob if hasattr(config, 'hidden_dropout_prob') else config.dropout_rate if hasattr(config, 'dropout_rate') else 0.1
+		hidden_dim = config.hidden_size if hasattr(config, 'hidden_size') else config.embed_dim if hasattr(config, 'embed_dim') else 768
+		self.config_initializer_range = config.initializer_range if hasattr(config, 'initializer_range') else 0.02
+		
+		# Define the head for encoding all virtual tokens
+		self._dropout = torch.nn.Dropout(dropout_prob)
+		self.layer_down_project = torch.nn.Linear(hidden_dim, hidden_dim, bias=True)
+		self.layer_up_project = torch.nn.Linear(hidden_dim, n_virtual_tokens * word_embedding_dim, bias=True)
+		
+		self.init_predictor_head()
 	
-	def forward(self, batch):
+	def init_predictor_head(self):
+		# Initialize the weights for the row head
+		self.layer_down_project.weight.data.normal_(mean=0.0, std=self.config_initializer_range)
+		self.layer_up_project.weight.data.normal_(mean=0.0, std=self.config_initializer_range)
+		self.layer_up_project.bias.data.zero_()
 		
-		# Encode
-		clf_logits = self.enc(*batch[:2])
+	@torch.no_grad()
+	def get_instance_embedding(self, input_ids, attention_mask=None):
 		
-		# Sample using Gumbel Softmax
-		k_vector = gumbel_softmax(clf_logits)
+		if attention_mask is None:
+			# Attend to all tokens
+			attention_mask = torch.ones_like(input_ids)
+			attention_mask = attention_mask.to(device=input_ids.device)
 		
-		# Decode: Multiply k_vector by the log probability of the response for corresponding k
-		resp_log_prob = torch.zeros((batch[0].size(0), self.args.num_libraries)).to(self.args.device)
-		for k in range(self.args.num_libraries):
-			resp_log_prob[:, k] = self.decode(batch[2:], k) * k_vector[:, k]
+		# Get the CLS token embedding
+		if self.args.enc_model_type == 'codebert-base':
+			x = self.base(input_ids, attention_mask=attention_mask)
+			x = x[0][:, 0, :]
 		
-		# Loss
-		reconstruction_loss = -resp_log_prob.sum(dim=-1).mean()
+		elif self.args.enc_model_type == 'codet5p-110m-embedding':
+			x = self.base(input_ids, attention_mask=attention_mask)
 		
-		# KL Divergence
-		kl_div = torch.sum(k_vector * torch.log(k_vector * self.args.num_libraries + 1e-8), dim=-1).mean()
-		
-		# Total loss
-		loss = reconstruction_loss + kl_div
-		
-		return loss, reconstruction_loss, kl_div
+		else:
+			x = self.base(
+				input_ids=input_ids,
+				attention_mask=attention_mask,
+				labels=input_ids,  # TODO: See if the forward pass works without labels
+				output_hidden_states=True
+			)['hidden_states'][-1]
+			
+			# Last token embedding
+			x = x[:, -1, :]
 	
+		return x.detach()
 	
-	def _save(self, accelerator):
-		args = self.args
+	def forward(self, input_ids, attention_mask=None):
 		
-		accelerator.wait_for_everyone()
-		model = accelerator.unwrap_model(self.dec)
-		model.save_pretrained(save_directory=args.save_at)  # In place of $ accelerator.save(model.state_dict(), path)
+		inst_embedding = self.get_instance_embedding(input_ids, attention_mask)
 		
-		prior = accelerator.unwrap_model(self.enc)
-		# prior.save_pretrained(save_directory=os.path.join(args.log_dir, "clf_predictor.pt"))
-		torch.save(prior.state_dict(), os.path.join(args.log_dir, "clf_predictor.pt"))
+		# Predict the row weights
+		soft_prompt_embedding = self._dropout(inst_embedding)
+		soft_prompt_embedding = self.layer_down_project(soft_prompt_embedding)
+		soft_prompt_embedding = torch.nn.functional.tanh(soft_prompt_embedding)
+		soft_prompt_embedding = self.layer_up_project(soft_prompt_embedding)
+		
+		# Reshape [B, N * D] -> [B, N, D]
+		soft_prompt_embedding = soft_prompt_embedding.view(-1, self.n_virtual_tokens, self.word_embedding_dim)
+		return soft_prompt_embedding
+
+	def __str__(self):
+		return f"IDPGEncoder/{self.args.enc_model_type}"
+	
+	def __repr__(self):
+		return f"IDPGEncoder/{self.args.enc_model_type}"
 
 

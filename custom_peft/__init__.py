@@ -45,19 +45,8 @@ from .peft_model import (
     PeftModelForFeatureExtraction,
 )
 # ################################################ My custom  ######################################### #
-from .my_peft_lib_model import (
-    PeftMultiModel,
-    PeftMultiModelForCausalLM,
-)
-from .my_peft_cvae_model import (
-    PeftCvaeModel,
-    PeftCvaeModelForCausalLM,
-)
-
-from .my_peft_ccvae_model import (
-    PeftCcvaeModel,
-    PeftCcvaeModelForCausalLM,
-)
+from .my_peft_cvae_model import PeftCvaeModel, PeftCvaeModelForCausalLM
+from .peft_idpg_baseline_model import PeftIDPGModel, PeftIDPGModelForCausalLM
 
 from .tuners import (
     AdaptionPromptConfig,
