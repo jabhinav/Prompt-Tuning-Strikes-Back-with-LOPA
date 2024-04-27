@@ -36,6 +36,8 @@ MODEL_CLASSES = {
 	'codet5p-110m-embedding': (AutoConfig, AutoModel),
 	'codet5p-220m': (AutoConfig, T5ForConditionalGeneration),
 	'codet5p-770m': (AutoConfig, T5ForConditionalGeneration),
+	'codet5p-2b': (AutoConfig, T5ForConditionalGeneration),
+	'codet5p-6b':  (AutoConfig, T5ForConditionalGeneration),
 	# ############################# Salesforce CodeGen Models ############################# #
 	'codegen-350M': (AutoConfig, AutoModelForCausalLM),
 	'codegen-2B': (AutoConfig, AutoModelForCausalLM),
@@ -75,6 +77,85 @@ TOKENIZER_CLASSES = {
 	'distilbert': DistilBertTokenizer,
 }
 
+LORA_IA3_TARGET_MODULES = {
+	# ############################# Microsoft Phi Models ############################## #
+	"phi-2": {
+		"target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+	},
+	# ############################# Salesforce CodeT5 Models ############################# #
+    "codet5p-220m": {
+        "target_modules_lora": ["q", "v", "k"],
+        "target_modules_ia3": ["q", "v", "k", "wi", "wo"],
+        "ff_modules": ["wi", "wo"]
+    },
+    "codet5p-770m": {
+        "target_modules_lora": ["q", "v", "k"],
+        "target_modules_ia3": ["q", "v", "k", "wi", "wo"],
+        "ff_modules": ["wi", "wo"]
+    },
+    "codet5p-2b": {
+        "target_modules_lora": ["qkv_proj"],
+        "target_modules_ia3": ["qkv_proj", "fc_in", "fc_out"],
+        "ff_modules": ["fc_in", "fc_out"]
+    },
+    "codet5p-6b": {
+        "target_modules_lora": ["qkv_proj"],
+        "target_modules_ia3": ["qkv_proj", "fc_in", "fc_out"],
+        "ff_modules": ["fc_in", "fc_out"]
+    },
+	# ############################# Salesforce CodeGen Models ############################# #
+	"codegen-350M": {
+		"target_modules_lora": ["qkv_proj"],
+		"target_modules_ia3": ["qkv_proj", "fc_in", "fc_out"],
+		"ff_modules": ["fc_in", "fc_out"]
+	},
+    "codegen2-1B": {
+        "target_modules_lora": ["qkv_proj"],
+        "target_modules_ia3": ["qkv_proj", "fc_in", "fc_out"],
+        "ff_modules": ["fc_in", "fc_out"]
+    },
+    "codegen2-3_7B": {
+        "target_modules_lora": ["qkv_proj"],
+        "target_modules_ia3": ["qkv_proj", "fc_in", "fc_out"],
+        "ff_modules": ["fc_in", "fc_out"]
+    },
+    "codegen2-7B": {
+        "target_modules_lora": ["qkv_proj"],
+        "target_modules_ia3": ["qkv_proj", "fc_in", "fc_out"],
+        "ff_modules": ["fc_in", "fc_out"]
+    },
+	# ############################# DeepSeek-Coder Models ############################# #
+	"deepseek-coder-1.3b-base": {
+		"target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+	},
+	# ############################# Meta LLama Models ############################# #
+    "CodeLlama-7b-hf": {
+        "target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+        "target_modules_ia3": ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
+        "ff_modules": ["gate_proj", "up_proj", "down_proj"]
+    },
+    "CodeLlama-7b-Instruct-hf": {
+        "target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+        "target_modules_ia3": ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
+        "ff_modules": ["gate_proj", "up_proj", "down_proj"]
+    },
+    "CodeLlama-7b-Python-hf": {
+        "target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+        "target_modules_ia3": ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
+        "ff_modules": ["gate_proj", "up_proj", "down_proj"]
+    },
+    "CodeLlama-13b-Python-hf": {
+        "target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+        "target_modules_ia3": ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
+        "ff_modules": ["gate_proj", "up_proj", "down_proj"]
+    },
+    "CodeLlama-34b-Python-hf": {
+        "target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+        "target_modules_ia3": ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
+        "ff_modules": ["gate_proj", "up_proj", "down_proj"]
+    }
+}
+
 
 def get_model_size(model):
 	model_parameters = filter(lambda p: p.requires_grad, model.parameters())
@@ -91,33 +172,23 @@ def load_tokenizer(model_type, tokenizer_name):
 		if is_rank_0():
 			print("Using AutoTokenizer for model_type: ", model_type)
 	
-	tokenizer = tokenizer_class.from_pretrained(tokenizer_name, trust_remote_code=True)
+	tokenizer = tokenizer_class.from_pretrained(
+		tokenizer_name,
+		trust_remote_code=True
+	)
+	
+	if not tokenizer.eos_token:
+		if tokenizer.bos_token:
+			tokenizer.eos_token = tokenizer.bos_token
+			tokenizer.eos_token_id = tokenizer.bos_token_id
+			logger.info("bos_token used as eos_token")
+		else:
+			raise ValueError("No eos_token or bos_token found")
 	
 	# Some Tokenizers do not have pad_token. We add it here. (It will only be used for ease of use in my pipeline.)
 	if tokenizer.pad_token_id is None or tokenizer.pad_token is None:
 		tokenizer.pad_token_id = tokenizer.eos_token_id
 		tokenizer.pad_token = tokenizer.eos_token
-	
-	# For Fast tokenizers imported from AutoTokenizer, they are missing some keys which we need that
-	# their corresponding (non-fast) slow tokenizers have.
-	if 'codegen' in model_type and isinstance(tokenizer, CodeGenTokenizerFast):
-		tokenizer_subclass = CodeGenTokenizer.from_pretrained(tokenizer_name)
-		
-		# Let's add the missing keys that we need in static.py
-		if not hasattr(tokenizer, 'added_tokens_encoder'):
-			tokenizer.added_tokens_encoder = tokenizer_subclass.added_tokens_encoder
-		
-		if not hasattr(tokenizer, 'added_tokens_decoder'):
-			tokenizer.added_tokens_decoder = tokenizer_subclass.added_tokens_decoder
-		
-		if not hasattr(tokenizer, 'byte_decoder'):
-			tokenizer.byte_decoder = tokenizer_subclass.byte_decoder
-		
-		if not hasattr(tokenizer, 'byte_encoder'):
-			tokenizer.byte_encoder = tokenizer_subclass.byte_encoder
-		
-		if not hasattr(tokenizer, 'errors'):
-			tokenizer.errors = tokenizer_subclass.errors
 	
 	if is_rank_0():
 		logger.info("Finish loading Tokenizer from %s", tokenizer_name)

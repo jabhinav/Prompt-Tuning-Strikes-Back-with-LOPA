@@ -1,3 +1,4 @@
+import math
 import os
 import time
 
@@ -9,15 +10,44 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration
 from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
-from transformers import get_constant_schedule_with_warmup
+from transformers import get_scheduler
 
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftIDPGModel
 from utils.config import get_config
 from utils.custom import is_rank_0
-from utils.data import MBPP_Dataset_wEnc as CustomDataset
-from utils.model import IDPGPromptEncoder as EmbeddingEncoder
+from utils.data import MBPP_Dataset_wEnc, CruxEval_Dataset_wEnc
+from utils.model import IDPGSoftPromptGenerator as EmbeddingEncoder
 from utils.xformer import load_base_model
 from utils.xformer import load_tokenizer, get_huggingface_path
+
+
+class IDPG(torch.nn.Module):
+	
+	def __init__(self, enc, dec):
+		super(IDPG, self).__init__()
+		self.enc = enc
+		self.dec = dec
+		
+		# Beta
+		self.config = self.enc.base.config
+	
+	def forward(self, batch):
+		# Encode
+		soft_prompt = self.enc(
+			input_ids=batch['enc_input_ids'],
+			attention_mask=batch['enc_attention_mask'],
+		)
+		
+		# Decode
+		output = self.dec(
+			soft_prompt=soft_prompt,
+			input_ids=batch['input_ids'],
+			attention_mask=batch['attention_mask'],
+			labels=batch['labels'],
+			output_hidden_states=True
+		)
+		
+		return output
 
 
 class Trainer(object):
@@ -58,7 +88,7 @@ class Trainer(object):
 		with self.accelerator.main_process_first():
 			self.logger.info("Building dataset...")
 			start = time.monotonic_ns()
-			self.train_dataloader = self._build_dataloader()
+			self.train_dataset, self.train_dataloader = self._build_dataloader()
 			end = time.monotonic_ns()
 			self.logger.info(f"Building dataset done in {(end - start) / 1e6:.2f}ms")
 		
@@ -94,9 +124,17 @@ class Trainer(object):
 		end = time.monotonic_ns()
 		self.logger.info(f"Initializing accelerate done in {(end - start) / 1e6:.2f}ms")
 		
+		# We need to recalculate our total training steps as the size of the training dataloader may have changed after
+		# Accelerator's prepare function.
+		self.recalculate_training_metrics()
+		
 		# save config file path
 		self.config_save_path = os.path.join(self.args.log_dir, "args.json")
 		self.device = self.accelerator.device
+		
+		# Finally, initialize the trackers. During init of the model we computed new arguments. Thus setting after that.
+		self.init_trackers()
+	
 	
 	def init_encoder(self):
 		"""
@@ -185,52 +223,84 @@ class Trainer(object):
 	
 	def _build_model(self):
 		
-		model = {
-			"dec": self.init_decoder(),  # First init the decoder to set eff. num virtual tokens and word embedding dim
-			"enc": self.init_encoder(),
-		}
+		dec = self.init_decoder()  # Init first
+		enc = self.init_encoder()
+		model = IDPG(enc, dec)
 		
 		return model
 	
 	def _build_optimizer(self):
-		optimizer_e = torch.optim.AdamW(self.model['enc'].parameters(), lr=self.args.enc_lr)
-		optimizer_d = torch.optim.AdamW(self.model['dec'].parameters(), lr=self.args.dec_lr)
-		return {"optimizer_enc": optimizer_e, "optimizer_dec": optimizer_d}
+		
+		# Creates Dummy Optimizer if `optimizer` was specified in the config file else creates Adam Optimizer
+		optimizer_cls = (
+			torch.optim.AdamW
+			if self.accelerator.state.deepspeed_plugin is None
+			   or "optimizer" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+			else accelerate.utils.DummyOptim
+		)
+		optimizer = optimizer_cls(self.model.parameters(), lr=self.args.lr)
+		
+		return optimizer
 	
 	def _build_scheduler(self):
-		# Get the learning rate scheduler
-		scheduler_e = get_constant_schedule_with_warmup(
-			optimizer=self.optimizer['optimizer_enc'],
-			num_warmup_steps=0,
-		)
-		scheduler_d = get_constant_schedule_with_warmup(
-			optimizer=self.optimizer['optimizer_dec'],
-			num_warmup_steps=0,
-		)
 		
-		return {"scheduler_enc": scheduler_e, "scheduler_dec": scheduler_d}
+		# Creates Dummy Scheduler if `scheduler` was specified in the config file else creates `args.lr_scheduler_type` Scheduler
+		if (
+				self.accelerator.state.deepspeed_plugin is None
+				or "scheduler" not in self.accelerator.state.deepspeed_plugin.deepspeed_config
+		):
+			lr_scheduler = get_scheduler(
+				name="constant",
+				optimizer=self.optimizer,
+				num_warmup_steps=self.args.num_warmup_steps,
+				num_training_steps=self.args.max_train_steps,
+			)
+		else:
+			lr_scheduler = accelerate.utils.DummyScheduler(
+				self.optimizer,
+				total_num_steps=self.args.max_train_steps,
+				warmup_num_steps=self.args.num_warmup_steps
+			)
+		return lr_scheduler
 	
 	def _build_dataloader(self):
-		# Get the dataset
-		dataset = CustomDataset(
-			path_to_data=self.args.path_to_data,
-			tokenizer=self.tokenizer,
-			max_prompt_length=self.args.max_prompt_length,
-			max_length=self.args.max_length,
-			sample_problems=self.args.num_train_problems,
-			mode='train',
-			enc_tokenizer=self.enc_tokenizer,
-		)
-		
-		self.args.batch_size = self.args.per_gpu_train_batch_size * max(1, self.args.n_gpu)
-		
+		with self.accelerator.main_process_first():
+			if self.args.dataset_name == 'mbpp':
+				dataset = MBPP_Dataset_wEnc(
+					path_to_data=self.args.path_to_data,
+					tokenizer=self.tokenizer,
+					max_prompt_length=self.args.max_prompt_length,
+					max_length=self.args.max_length,
+					sample_problems=self.args.num_train_problems,
+					mode='train',
+					enc_tokenizer=self.enc_tokenizer,
+				)
+			elif self.args.dataset_name == 'cruxeval':
+				dataset = CruxEval_Dataset_wEnc(
+					tokenizer=self.tokenizer,
+					max_length=self.args.max_length,
+					mode='train',
+					enc_tokenizer=self.enc_tokenizer,
+					cruxeval_task=self.args.cruxeval_task,
+					prefix=self.args.prefix,
+					cot=self.args.cot,
+				)
+				
 		# Prepare training data loader
 		sampler = RandomSampler(dataset)
-		train_dataloader = DataLoader(dataset, sampler=sampler, batch_size=self.args.batch_size, num_workers=0,
-									  pin_memory=False)
-		self.args.num_training_steps = (len(train_dataloader) * self.args.num_epochs)
+		train_dataloader = DataLoader(
+			dataset,
+			sampler=sampler,
+			batch_size=self.args.per_gpu_train_batch_size,
+			num_workers=0,
+			pin_memory=False
+		)
 		
-		return train_dataloader
+		num_update_steps_per_epoch = math.ceil(
+			len(train_dataloader) / self.accelerator.gradient_accumulation_steps)
+		self.args.max_train_steps = self.args.num_epochs * num_update_steps_per_epoch
+		
+		return dataset, train_dataloader
 	
 	def _init_accelerator(self):
 		
@@ -252,15 +322,7 @@ class Trainer(object):
 				project_config=project_config,
 				kwargs_handlers=[kwargs],
 			)
-		
-		# Initialize the trackers
-		with self.accelerator.main_process_first():
-			self.accelerator.init_trackers(
-				project_name=self.args.project_name,
-				config=vars(self.args),
-				init_kwargs={"wandb": {"name": "idpg"}}
-			)
-	
+			
 	def _ds_prepare(self):
 		# [TO AVOID] You must specify a training or evaluation dataloader in accelerate.prepare() when using DeepSpeed
 		# Debug: https://github.com/huggingface/accelerate/pull/676
@@ -269,41 +331,55 @@ class Trainer(object):
 	
 	def _accelerator_prepare(self):
 		
-		self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
+		self.train_dataloader, self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
+			self.train_dataloader, self.model, self.optimizer, self.scheduler)
+	
+	def recalculate_training_metrics(self):
 		
-		if isinstance(self.model, dict):
-			for key in self.model.keys():
-				self.model[key] = self.accelerator.prepare(self.model[key])
-		else:
-			self.model = self.accelerator.prepare(self.model)
+		num_update_steps_per_epoch = math.ceil(
+			len(self.train_dataloader) / self.accelerator.gradient_accumulation_steps)
+		self.args.max_train_steps = self.args.num_epochs * num_update_steps_per_epoch
 		
-		if isinstance(self.optimizer, dict):
-			for key in self.optimizer.keys():
-				self.optimizer[key] = self.accelerator.prepare(self.optimizer[key])
-		else:
-			self.optimizer = self.accelerator.prepare(self.optimizer)
+		# # After wards we recalculate our number of training epochs.
+		# Keep this. Useful when max_train_steps is to be set manually
+		self.args.num_epochs = math.ceil(self.args.max_train_steps / num_update_steps_per_epoch)
+		self.args.total_batch_size = (
+				self.args.per_gpu_train_batch_size * self.accelerator.num_processes * self.accelerator.gradient_accumulation_steps
+		)
 		
-		if isinstance(self.scheduler, dict):
-			for key in self.scheduler.keys():
-				self.scheduler[key] = self.accelerator.prepare(self.scheduler[key])
-		else:
-			self.scheduler = self.accelerator.prepare(self.scheduler)
+		self.logger.info("\n")
+		self.logger.info(f"  Num examples = {len(self.train_dataset)}")
+		self.logger.info(f"  Num Epochs = {self.args.num_epochs}")
+		self.logger.info(f"  Instantaneous batch size per device = {self.args.per_gpu_train_batch_size}")
+		self.logger.info(
+			f"  Total train batch size (w. parallel, distributed & accumulation) = {self.args.total_batch_size}")
+		self.logger.info(f"  Gradient Accumulation steps = {self.accelerator.gradient_accumulation_steps}")
+		self.logger.info(f"  Total optimization steps = {self.args.max_train_steps}")
+		self.logger.info("\n")
+	
+	def init_trackers(self):
+		# Initialize the trackers
+		with self.accelerator.main_process_first():
+			self.accelerator.init_trackers(
+				project_name=self.args.project_name,
+				config=vars(self.args),
+				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_idpg"}}
+			)
 	
 	@staticmethod
 	def __count_parameters(model):
-		enc_trainable_params = sum(p.numel() for p in model['enc'].parameters() if p.requires_grad)
-		enc_all_params = sum(p.numel() for p in model['enc'].parameters())
+		enc_trainable_params = sum(p.numel() for p in model.enc.parameters() if p.requires_grad)
+		enc_all_params = sum(p.numel() for p in model.enc.parameters())
 		dec_trainable_params, dec_all_params = 0, 0  # IDPG does not have trainable params in the decoder
 		return enc_trainable_params, enc_all_params
 	
 	def get_reconstruction_loss(self, batch, model, soft_prompt):
-		prompt, prompt_mask, response, response_mask = batch
 		
 		output = model(
 			soft_prompt=soft_prompt,
-			input_ids=prompt,
-			attention_mask=prompt_mask,
-			labels=response,
+			input_ids=batch['input_ids'],
+			attention_mask=batch['attention_mask'],
+			labels=batch['labels'],
 			output_hidden_states=True
 		)
 		
@@ -313,25 +389,24 @@ class Trainer(object):
 		r"""Forward step for training and inference. This function is called
 		in ``_train_step`` & ``_test_step`` function.
 		"""
-		# Encode
-		soft_prompt = self.model["enc"](*batch[:2])
-		
-		# Loss function = -log(p(x|z))
-		reconstruction_loss = self.get_reconstruction_loss(
-			batch[2:],
-			self.model["dec"],
-			soft_prompt=soft_prompt
-		)
-		
-		# Total loss
-		total_loss = reconstruction_loss
-		
-		# BP and Grad Updated
-		self.optimizer["optimizer_enc"].zero_grad()
-		self.optimizer["optimizer_dec"].zero_grad()
-		self.accelerator.backward(total_loss)
-		self.optimizer["optimizer_enc"].step()
-		self.optimizer["optimizer_dec"].step()
+		with self.accelerator.accumulate(self.model):
+			output = self.model(batch)
+			
+			# Loss function = -log(p(x|z))
+			reconstruction_loss = output.loss
+			
+			# Total loss
+			total_loss = reconstruction_loss
+			
+			# BP and Grad Updated
+			self.accelerator.backward(total_loss)
+			self.optimizer.step()
+			self.scheduler.step()
+			self.optimizer.zero_grad()
+			
+			if self.accelerator.sync_gradients:
+				# Updating the current step under the accumulate context manager takes care of everything
+				self.step += 1
 		
 		return {
 			f"total_loss": total_loss.detach().cpu().numpy().item(),
@@ -347,11 +422,9 @@ class Trainer(object):
 		"""
 		
 		# Set the models to train mode
-		self.model["enc"].train()
-		self.model["dec"].train()
+		self.model.train()
 		
 		epoch_losses: dict = {}
-		epoch_step: int = 0
 		for batch in tqdm(
 				self.train_dataloader,
 				desc=f"Training Epoch {self.epoch}",
@@ -364,33 +437,22 @@ class Trainer(object):
 		):
 			# with self.accelerator.accumulate(self.model):
 			train_losses, train_stats = self._train_step(batch)
-			
-			self.batch_count += 1
-			
-			if self.batch_count % self.args.gradient_accumulation_steps == 0:
 				
-				for key, value in train_losses.items():
-					if key not in epoch_losses.keys():
-						epoch_losses[key] = value
-					else:
-						epoch_losses[key] += value
-				
-				if self.args.wandb_logging:
-					self.accelerator.log(
-						{
-							"Step/Total Loss": train_losses["total_loss"],
-							"Step/Reconstruction Loss": train_losses["reconstruction_loss"],
-							"Step/Encoder Learning Rate": self.optimizer[
-								"optimizer_enc"
-							].param_groups[0]["lr"],
-							"Step/Decoder Learning Rate": self.optimizer[
-								"optimizer_dec"
-							].param_groups[0]["lr"],
-						},
-						step=self.step,
-					)
-				self.step += 1
-				epoch_step += 1
+			for key, value in train_losses.items():
+				if key not in epoch_losses.keys():
+					epoch_losses[key] = value
+				else:
+					epoch_losses[key] += value
+			
+			if self.args.wandb_logging:
+				self.accelerator.log(
+					{
+						"Step/Total Loss": train_losses["total_loss"],
+						"Step/Reconstruction Loss": train_losses["reconstruction_loss"],
+						"Step/Learning Rate": self.optimizer.param_groups[0]["lr"],
+					},
+					step=self.step,
+				)
 		
 		self.accelerator.wait_for_everyone()
 		
@@ -448,15 +510,15 @@ class Trainer(object):
 			os.makedirs(save_at)
 		
 		# Save Encoder
-		enc = self.accelerator.unwrap_model(self.model['enc'])
+		enc = self.accelerator.unwrap_model(self.model.enc)
 		state_dict = enc.state_dict()
 		# Remove the enc.base layers before saving [IDPG-specific]
 		state_dict = {k: v for k, v in state_dict.items() if "base" not in k}
 		torch.save(state_dict, os.path.join(save_at, "clf_predictor.pt"))
 		del state_dict
 		
-		# Save Decoder
-		dec = self.accelerator.unwrap_model(self.model['dec'])
+		# Save Decoder [won't be used, saving for consistency]
+		dec = self.accelerator.unwrap_model(self.model.dec)
 		dec.save_pretrained(
 			save_directory=os.path.join(save_at, "PEFT"),
 			is_main_process=is_rank_0(),

@@ -6,17 +6,17 @@ import accelerate
 import torch
 from accelerate import DistributedDataParallelKwargs
 from accelerate.logging import MultiProcessAdapter
-from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration
 from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
-from transformers import get_constant_schedule_with_warmup, get_scheduler
+from transformers import get_scheduler
 
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftCvaeModel
 from utils.config import get_config
 from utils.custom import is_rank_0
-from utils.data import MBPP_Dataset_wEnc as CustomDataset
-from utils.model import PromptSpecificClarificationEncoder as EmbeddingEncoder
+from utils.data import MBPP_Dataset_wEnc
+from utils.data import CruxEval_Dataset_wEnc
+from utils.model import LatentPromptAttentionGenerator as EmbeddingEncoder
 from utils.xformer import load_base_model
 from utils.xformer import load_tokenizer, get_huggingface_path
 
@@ -34,16 +34,18 @@ class CVAE(torch.nn.Module):
 	def forward(self, batch):
 
 		# Encode
-		att_logits = self.enc(*batch[:2])
+		att_logits = self.enc(
+			input_ids=batch['enc_input_ids'],
+			attention_mask=batch['enc_attention_mask'],
+		)
 		att_weights = torch.sigmoid(att_logits)
 		
 		# Decode
-		prompt, prompt_mask, response, response_mask = batch[2:]
 		output = self.dec(
 			latent_attention_weights=att_weights,
-			input_ids=prompt,
-			attention_mask=prompt_mask,
-			labels=response,
+			input_ids=batch['input_ids'],
+			attention_mask=batch['attention_mask'],
+			labels=batch['labels'],
 			output_hidden_states=True
 		)
 		
@@ -252,15 +254,26 @@ class Trainer(object):
 	def _build_dataloader(self):
 		# Get the dataset
 		with self.accelerator.main_process_first():
-			dataset = CustomDataset(
-				path_to_data=self.args.path_to_data,
-				tokenizer=self.tokenizer,
-				max_prompt_length=self.args.max_prompt_length,
-				max_length=self.args.max_length,
-				sample_problems=self.args.num_train_problems,
-				mode='train',
-				enc_tokenizer=self.enc_tokenizer,
-			)
+			if self.args.dataset_name == 'mbpp':
+				dataset = MBPP_Dataset_wEnc(
+					path_to_data=self.args.path_to_data,
+					tokenizer=self.tokenizer,
+					max_prompt_length=self.args.max_prompt_length,
+					max_length=self.args.max_length,
+					sample_problems=self.args.num_train_problems,
+					mode='train',
+					enc_tokenizer=self.enc_tokenizer,
+				)
+			elif self.args.dataset_name == 'cruxeval':
+				dataset = CruxEval_Dataset_wEnc(
+					tokenizer=self.tokenizer,
+					max_length=self.args.max_length,
+					mode='train',
+					enc_tokenizer=self.enc_tokenizer,
+					cruxeval_task=self.args.cruxeval_task,
+					prefix=self.args.prefix,
+					cot=self.args.cot,
+				)
 		
 		# Prepare training data loader
 		sampler = RandomSampler(dataset)
@@ -344,14 +357,13 @@ class Trainer(object):
 		self.logger.info(f"  Total optimization steps = {self.args.max_train_steps}")
 		self.logger.info("\n")
 		
-	
 	def init_trackers(self):
 		# Initialize the trackers
 		with self.accelerator.main_process_first():
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": "cVAE"}}
+				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_cvae"}}
 			)
 	
 	@staticmethod

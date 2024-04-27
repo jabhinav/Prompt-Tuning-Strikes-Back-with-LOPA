@@ -2,7 +2,7 @@ import argparse
 import copy
 from custom_benchmark.benchmark import PyTorchBenchmark
 from custom_benchmark.benchmark_args import PyTorchBenchmarkArguments
-from utils.model import PromptSpecificClarificationEncoder, IDPGPromptEncoder
+from utils.model import LatentPromptAttentionGenerator, IDPGSoftPromptGenerator
 
 
 # _args = PyTorchBenchmarkArguments(models=["google-bert/bert-base-uncased"], batch_sizes=[1], sequence_lengths=[8, 32])
@@ -23,11 +23,11 @@ for t in n_virtual_tokens_exp:
 	
 	args1 = copy.deepcopy(args)
 	args1.enc_model_type = "codebert-base"
-	enc1 = PromptSpecificClarificationEncoder(args1, args1.n_virtual_tokens, args1.word_embedding_dim)
+	enc1 = LatentPromptAttentionGenerator(args1, args1.n_virtual_tokens, args1.word_embedding_dim)
 	
 	args2 = copy.deepcopy(args)
 	args2.enc_model_type = 'codegen-350M'
-	enc2 = IDPGPromptEncoder(args2, args2.n_virtual_tokens, args2.word_embedding_dim)
+	enc2 = IDPGSoftPromptGenerator(args2, args2.n_virtual_tokens, args2.word_embedding_dim)
 	enc1_name = str(enc1)
 	enc2_name = str(enc2)
 	

@@ -9,7 +9,7 @@ import GPUtil
 import numpy as np
 import torch
 from pynvml import *
-from transformers import set_seed
+from transformers import set_seed as _set_seed
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +151,6 @@ def set_dist(args):
 
 def set_seed(args):
 	"""set random seed."""
-	set_seed(args.seed)
+	_set_seed(args.seed)
 
 

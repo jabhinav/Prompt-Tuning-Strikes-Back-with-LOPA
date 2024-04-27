@@ -1,7 +1,10 @@
 import json
 import os
 import logging
-from typing import Dict, List, Optional
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+from utils.data import CruxEval_Dataset
+from utils.custom import is_rank_0
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +110,7 @@ def decode_predictions(args, gen_token_dict, tokenizer, dataset) -> List[List[Op
 	for sample, generated_tokens in gen_token_dict.items():
 		for s in generated_tokens:
 			
-			# Remove the prompt from the generated code
+			# Remove the prompt from the generated code. This works when for the max_prompt_length, s only has prompt
 			s = s[args.max_prompt_length:]
 			
 			# Remove the bos token if it's present
@@ -137,3 +140,37 @@ def decode_predictions(args, gen_token_dict, tokenizer, dataset) -> List[List[Op
 
 	
 	return code_gens
+
+
+def decode_cruxeval_predictions(gen_token_dict, tokenizer, dataset: CruxEval_Dataset) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+	code_gens = defaultdict(list)
+	code_gens_raw = defaultdict(list)
+	
+	# Remove the following pre-defined prefix from the generated tokens
+	for _idx, list_of_preds in gen_token_dict.items():
+		for _pred in list_of_preds:
+			
+			# For empty predictions
+			if len(_pred) == 0:
+				code_gens[_idx].append("")
+				code_gens_raw[_idx].append("")
+				continue
+			
+			gen_text = tokenizer.decode(
+				_pred, skip_special_tokens=True, clean_up_tokenization_spaces=False
+			)  # Remove special tokens else postprocess fn will fail
+			try:
+				# some tokenizers add a multi-token prefix to the generation (e.g ChatGLM)
+				tokenizer_prefix = tokenizer.decode(tokenizer.get_prefix_tokens())
+				if gen_text.startswith(f"{tokenizer_prefix}"):
+					gen_text = gen_text[len(tokenizer_prefix):].lstrip()
+			except:
+				pass
+
+			# Post-process the generated text
+			processed_text = dataset.task.postprocess_generation(gen_text, _idx)
+			
+			code_gens_raw[dataset.idx_to_id[_idx]].append(gen_text)
+			code_gens[dataset.idx_to_id[_idx]].append(processed_text)
+	
+	return code_gens, code_gens_raw

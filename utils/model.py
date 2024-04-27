@@ -43,9 +43,9 @@ def get_clf_embedding(args, model, prompt, prompt_mask, response, library_idx):
 	return embedding
 
 
-class PromptSpecificClarificationEncoder(torch.nn.Module):
+class LatentPromptAttentionGenerator(torch.nn.Module):
 	def __init__(self, args, n_virtual_tokens, word_embedding_dim, freeze_base=False):
-		super(PromptSpecificClarificationEncoder, self).__init__()
+		super(LatentPromptAttentionGenerator, self).__init__()
 		
 		config, base = load_base_model(
 			model_type=args.enc_model_type,
@@ -104,6 +104,8 @@ class PromptSpecificClarificationEncoder(torch.nn.Module):
 		
 		# Get the CLS token embedding
 		if self.args.enc_model_type == 'codebert-base':
+			# [IMP] Codebert Base is based on RoBERTa model: Getting the seq representation should match with that of
+			# default RobertaForSequenceClassification & RobertaClassificationHead
 			x = self.base(input_ids, attention_mask=attention_mask)
 			x = x[0][:, 0, :]
 		
@@ -111,15 +113,17 @@ class PromptSpecificClarificationEncoder(torch.nn.Module):
 			x = self.base(input_ids, attention_mask=attention_mask)
 		
 		else:
+			# Should be used for decoder models
 			x = self.base(
 				input_ids=input_ids,
 				attention_mask=attention_mask,
 				labels=input_ids,
 				output_hidden_states=True
-			)['hidden_states'][-1]
+			)['hidden_states'][-1]  # Get the last layer hidden states
 			
-			# Last token embedding
+			# Last token embedding or [TODO] pass seq_lengths to get last non-padded token embedding
 			x = x[:, -1, :]
+			# x = x[torch.arange(x.size(0)), seq_lengths, :]
 		
 		return x
 	
@@ -159,9 +163,9 @@ class PromptSpecificClarificationEncoder(torch.nn.Module):
 		return f"MyEncoder/{self.args.enc_model_type}"
 
 
-class IDPGPromptEncoder(torch.nn.Module):
+class IDPGSoftPromptGenerator(torch.nn.Module):
 	def __init__(self, args, n_virtual_tokens, word_embedding_dim):
-		super(IDPGPromptEncoder, self).__init__()
+		super(IDPGSoftPromptGenerator, self).__init__()
 		
 		# In IDPG, the encoder is the same as the decoder
 		config, base = load_base_model(
@@ -216,6 +220,7 @@ class IDPGPromptEncoder(torch.nn.Module):
 			x = self.base(input_ids, attention_mask=attention_mask)
 		
 		else:
+			# Should be used for decoder models
 			x = self.base(
 				input_ids=input_ids,
 				attention_mask=attention_mask,
@@ -223,8 +228,9 @@ class IDPGPromptEncoder(torch.nn.Module):
 				output_hidden_states=True
 			)['hidden_states'][-1]
 			
-			# Last token embedding
+			# Last token embedding or [TODO] pass seq_lengths to get last non-padded token embedding
 			x = x[:, -1, :]
+			# x = x[torch.arange(x.size(0)), seq_lengths, :]
 	
 		return x.detach()
 	

@@ -23,16 +23,17 @@ def get_config():
 	logger = logging.getLogger(__name__)
 	
 	# Define the parameters
-	model_type = "phi-2"  # codegen-350M, phi-2, codegen2-3_7B, deepseek-coder-1.3b-base, deepseek-coder-7b-base
+	model_type = "deepseek-coder-1.3b-base"  # codegen-350M, phi-2, codegen2-3_7B, deepseek-coder-1.3b-base, deepseek-coder-7b-base
 	huggingface_path = get_huggingface_path(model_type)
 	
 	parser = argparse.ArgumentParser()
 	
 	# High-level
+	parser.add_argument("--dataset_name", type=str, default='cruxeval', choices=['mbpp', 'cruxeval'])
 	parser.add_argument('--wandb_logging', type=bool, default=True)
 	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
 	parser.add_argument('--do_peft', type=int, default=None)
-	parser.add_argument('--seed', type=int, default=9876, help="random seed for initialization")
+	parser.add_argument('--seed', type=int, default=9876, help="random seed for init.")
 	
 	# Paths
 	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')
@@ -41,12 +42,14 @@ def get_config():
 	parser.add_argument('--load_base_from_path', type=str, default=None)
 	parser.add_argument('--clf_predictor_path', type=str, default=None)
 	
-	# Prompt Tuning Parameters
-	parser.add_argument('--num_libraries', type=int, default=5)
-	parser.add_argument('--num_virtual_tokens', type=int, default=10)
+	# Data Parameters
 	parser.add_argument('--max_prompt_length', type=int, default=325)  # Max 384
 	parser.add_argument('--max_length', type=int, default=325+256)  # Max 384+512
 	parser.add_argument("--max_new_tokens", type=int, default=256)
+	
+	# Prompt Tuning Parameters
+	parser.add_argument('--num_libraries', type=int, default=5)
+	parser.add_argument('--num_virtual_tokens', type=int, default=10)
 	
 	# Model
 	parser.add_argument("--model_type", type=str, default=model_type)
@@ -56,8 +59,8 @@ def get_config():
 	
 	# Training
 	parser.add_argument("--num_epochs", type=int, default=10)
-	parser.add_argument("--per_gpu_train_batch_size", type=int, default=2)
-	parser.add_argument("--lr", type=float, default=1e-3)
+	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)
+	parser.add_argument("--lr", type=float, default=1e-4, help="1e-3 for PT, 1e-4 for LoRA(r=16, alpha=32)")
 	parser.add_argument("--ent_coeff", type=float, default=0.0)
 	parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
 	parser.add_argument("--num_warmup_steps", type=int, default=0)
@@ -71,7 +74,8 @@ def get_config():
 	parser.add_argument("--prior_lr", type=float, default=5e-6)
 	
 	# VAE params
-	parser.add_argument("--enc_model_type", type=str, default="codebert-base")  # "codebert-base", "codet5p-110m-embedding"
+	parser.add_argument("--enc_model_type"
+						".", type=str, default="codebert-base")  # "codebert-base", "codet5p-110m-embedding"
 	parser.add_argument("--enc_lr", type=float, default=1e-3)
 	parser.add_argument("--dec_lr", type=float, default=5e-4)
 	parser.add_argument("--kl_coeff", type=float, default=10.0)
@@ -89,6 +93,7 @@ def get_config():
 	parser.add_argument("--num_return_sequences_per_iter", type=int, default=1)
 	parser.add_argument("--temperature", type=float, default=0.6)
 	parser.add_argument("--top_p", type=float, default=0.95)
+	parser.add_argument("--top_k", type=float, default=-1)
 	
 	# Debugging
 	parser.add_argument('--db', default=False,
@@ -97,13 +102,13 @@ def get_config():
 	# Hardware configuration
 	parser.add_argument("--load_in_8bit", type=bool, default=False,)
 	parser.add_argument("--no_cuda", help="Avoid using CUDA when available")
-	parser.add_argument("--local_rank", type=int, default=-1,
-						help="For distributed training (multi-node): local_rank")
+	parser.add_argument("--local_rank", type=int, default=-1, help="For multi-node training: local_rank")
 	parser.add_argument("--node_index", type=int, default=-1, help="node index if multi-node running")
 	parser.add_argument("--gpu_per_node", type=int, default=4, help="num of gpus per node")
 	
 	args = parser.parse_args()
 	
+	# Set the log_dir
 	args.log_dir = log_dir
 	
 	# Update the max_length and max_prompt_length by deducting the number of virtual tokens
@@ -114,6 +119,9 @@ def get_config():
 	set_seed(args)
 	
 	update_args_with_custom_attributes(args)
+	
+	if args.dataset_name == 'cruxeval':
+		add_cruxeval_args(args)
 	
 	# Log the config
 	config: dict = vars(args)
@@ -133,4 +141,22 @@ def update_args_with_custom_attributes(args):
 	
 	# [[[HERE]]] Only used by prior
 	args.path_to_train_prior_labels = './logging/train_gt_instance.json'
+	
+
+def add_cruxeval_args(args):
+	
+	# Update the max length [used by cruxeval -> 1024]
+	args.max_length = 512  # I have chosen this based on the max length of the prompt and the code generation
+	
+	# Prefix to add to the prompt. For example InCoder needs prefix='<| file ext=.py |>\n'
+	args.prefix = ""
+	
+	# Use chain-of-thoughts for the prompt: Choose from False, True [both used by cruxeval]
+	args.cot = False
+	
+	# Task: Choose from "input_prediction", "output_prediction"
+	args.cruxeval_task = "input_prediction"
+	
+	# Temperature for generation: Choose from 0.2, 0.8 [both used by cruxeval]
+	args.temperature = 0.2
 	
