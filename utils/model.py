@@ -117,7 +117,7 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 			x = self.base(
 				input_ids=input_ids,
 				attention_mask=attention_mask,
-				labels=input_ids,
+				labels=input_ids,  # TODO: See if the forward pass works without labels
 				output_hidden_states=True
 			)['hidden_states'][-1]  # Get the last layer hidden states
 			
@@ -255,3 +255,60 @@ class IDPGSoftPromptGenerator(torch.nn.Module):
 		return f"IDPGEncoder/{self.args.enc_model_type}"
 
 
+class CVAE(torch.nn.Module):
+	
+	def __init__(self, enc, dec):
+		super(CVAE, self).__init__()
+		self.enc = enc
+		self.dec = dec
+		
+		# Beta
+		self.config = self.enc.base.config
+	
+	def forward(self, batch):
+		# Encode
+		att_logits = self.enc(
+			input_ids=batch['enc_input_ids'],
+			attention_mask=batch['enc_attention_mask'],
+		)
+		att_weights = torch.sigmoid(att_logits)
+		
+		# Decode
+		output = self.dec(
+			latent_attention_weights=att_weights,
+			input_ids=batch['input_ids'],
+			attention_mask=batch['attention_mask'],
+			labels=batch['labels'],
+			output_hidden_states=True
+		)
+		
+		return output
+
+
+class IDPG(torch.nn.Module):
+	
+	def __init__(self, enc, dec):
+		super(IDPG, self).__init__()
+		self.enc = enc
+		self.dec = dec
+		
+		# Beta
+		self.config = self.enc.base.config
+	
+	def forward(self, batch):
+		# Encode
+		soft_prompt = self.enc(
+			input_ids=batch['enc_input_ids'],
+			attention_mask=batch['enc_attention_mask'],
+		)
+		
+		# Decode
+		output = self.dec(
+			soft_prompt=soft_prompt,
+			input_ids=batch['input_ids'],
+			attention_mask=batch['attention_mask'],
+			labels=batch['labels'],
+			output_hidden_states=True
+		)
+		
+		return output

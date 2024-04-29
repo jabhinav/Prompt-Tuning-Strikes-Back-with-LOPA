@@ -23,14 +23,14 @@ def get_config():
 	logger = logging.getLogger(__name__)
 	
 	# Define the parameters
-	model_type = "deepseek-coder-1.3b-base"  # codegen-350M, phi-2, codegen2-3_7B, deepseek-coder-1.3b-base, deepseek-coder-7b-base
+	model_type = "codegen-350M"  # codegen-350M, phi-2, codegen2-3_7B, deepseek-coder-1.3b-base, deepseek-coder-7b-base
 	huggingface_path = get_huggingface_path(model_type)
 	
 	parser = argparse.ArgumentParser()
 	
 	# High-level
 	parser.add_argument("--dataset_name", type=str, default='cruxeval', choices=['mbpp', 'cruxeval'])
-	parser.add_argument('--wandb_logging', type=bool, default=True)
+	parser.add_argument('--wandb_logging', type=bool, default=False)
 	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
 	parser.add_argument('--do_peft', type=int, default=None)
 	parser.add_argument('--seed', type=int, default=9876, help="random seed for init.")
@@ -58,13 +58,13 @@ def get_config():
 	parser.add_argument("--tokenizer_name", type=str, default=huggingface_path)
 	
 	# Training
-	parser.add_argument("--num_epochs", type=int, default=10)
+	parser.add_argument("--num_epochs", type=int, default=20)
 	parser.add_argument("--per_gpu_train_batch_size", type=int, default=1)
-	parser.add_argument("--lr", type=float, default=1e-4, help="1e-3 for PT, 1e-4 for LoRA(r=16, alpha=32)")
+	parser.add_argument("--lr", type=float, default=1e-3, help="1e-3 for PT, 1e-4 for LoRA(r=16, alpha=32)")
 	parser.add_argument("--ent_coeff", type=float, default=0.0)
 	parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
 	parser.add_argument("--num_warmup_steps", type=int, default=0)
-	parser.add_argument("--save_every", type=int, default=4)
+	parser.add_argument("--save_every", type=int, default=-1)
 	
 	# EM-specific
 	parser.add_argument("--num_init_epochs", type=int, default=5)
@@ -74,8 +74,7 @@ def get_config():
 	parser.add_argument("--prior_lr", type=float, default=5e-6)
 	
 	# VAE params
-	parser.add_argument("--enc_model_type"
-						".", type=str, default="codebert-base")  # "codebert-base", "codet5p-110m-embedding"
+	parser.add_argument("--enc_model_type", type=str, default="codebert-base")  # "codebert-base", "codet5p-110m-embedding"
 	parser.add_argument("--enc_lr", type=float, default=1e-3)
 	parser.add_argument("--dec_lr", type=float, default=5e-4)
 	parser.add_argument("--kl_coeff", type=float, default=10.0)

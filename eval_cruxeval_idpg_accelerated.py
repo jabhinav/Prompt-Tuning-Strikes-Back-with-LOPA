@@ -9,17 +9,48 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 
+from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftIDPGModel
 from utils.config import get_config
 from utils.eval import decode_cruxeval_predictions
 from torch.utils.data.dataloader import DataLoader
 from utils.data import CruxEval_Dataset_wEnc as CustomDataset
 from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
+from utils.model import LatentPromptAttentionGenerator as EmbeddingEncoder
 
 from transformers import StoppingCriteria
 from torch import LongTensor, FloatTensor, eq
 
 
-def load_model(args, logger, accelerator):
+def load_encoder(args, logger, accelerator):
+	"""
+			Initialize the encoder.
+	"""
+	
+	model = EmbeddingEncoder(
+		args=args,
+		n_virtual_tokens=args.total_virtual_tokens,
+		word_embedding_dim=args.word_embedding_dim
+	)
+	
+	# Load the model state dict on the CPU to avoid an OOM error.
+	loaded_state_dict = torch.load(args.clf_predictor_path, map_location="cpu")
+	loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
+	loaded_state_dict = {k: v for k, v in loaded_state_dict.items() if 'base' not in k}  # Remove base model weights
+	model.load_state_dict(loaded_state_dict, strict=False)  # strict=False allows for partial loading [IDPG-specific]
+	
+	# release memory
+	del loaded_state_dict
+	
+	# Log the loaded checkpoint
+	msg = "[INFO] Loaded encoder checkpoint from path: {}".format(args.clf_predictor_path)
+	logger.info(msg)
+	if accelerator.is_local_main_process:
+		print(msg)
+	
+	return model
+
+
+def load_decoder(args, logger, accelerator):
 	# Get the model
 	_, model = load_base_model(
 		model_type=args.model_type,
@@ -27,6 +58,50 @@ def load_model(args, logger, accelerator):
 		model_path=args.model_name_or_path,
 		load_in_8bit=args.load_in_8bit
 	)
+	
+	# Load checkpoint
+	if args.load_base_from_path is not None:
+		# We load the model state dict on the CPU to avoid an OOM error.
+		loaded_state_dict = torch.load(args.load_base_from_path, map_location="cpu")
+		loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
+		model.load_state_dict(loaded_state_dict, strict=True)
+		
+		# release memory
+		del loaded_state_dict
+		
+		# Log the loaded checkpoint
+		message = "[INFO] Loaded model checkpoint from path: {}".format(args.load_base_from_path)
+		logger.info(message)
+		if accelerator.is_local_main_process:
+			print(message)
+	
+	if not os.path.exists(args.load_adapter_from):
+		logger.error("Please specify the correct path to load the model adapters from")
+		raise ValueError("Please specify the correct path to load the model adapters from")
+	
+	# Get the config
+	peft_config = PromptTuningConfig(
+		task_type=TaskType.IDPG_CAUSAL_LM,
+		prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
+		num_virtual_tokens=args.num_virtual_tokens,
+	)
+	
+	# # Load the model adapters - in place
+	model = PeftIDPGModel.from_pretrained(
+		model=model,
+		model_id=args.load_adapter_from,  # Must be a directory containing the model files
+		config=peft_config,
+	)
+	
+	msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
+	logger.info(msg)
+	if accelerator.is_local_main_process:
+		print(msg)
+	
+	# This should match dimensions of torch.nn.Embedding(total_virtual_tokens, config.token_dim)
+	args.total_virtual_tokens = args.num_virtual_tokens * peft_config.num_transformer_submodules
+	args.word_embedding_dim = peft_config.token_dim
+	
 	return model
 
 
@@ -57,16 +132,21 @@ def evaluate(args, logger):
 	# # Leave this as is to only read prompt for any type of data
 	ds_loader = DataLoader(dataset, batch_size=1)
 	
-	# Get the model
-	model = load_model(args, logger, accelerator)
-	model.eval()
+	# Get the decoder
+	decoder = load_decoder(args, logger, accelerator)
+	decoder.eval()
+	
+	# Get the encoder
+	encoder = load_encoder(args, logger, accelerator)
+	encoder.eval()
 	
 	if args.load_in_8bit:
-		# model.to() is not supported for 8bit and 4bit models
-		model, ds_loader = accelerator.prepare(model, ds_loader)
+		# decoder.to() is not supported for 8bit and 4bit models
+		encoder, decoder, ds_loader = accelerator.prepare(encoder, decoder, ds_loader)
 	else:
 		# we only wrap data loader to avoid extra memory occupation
-		model = model.to(accelerator.device)
+		decoder = decoder.to(accelerator.device)
+		encoder = encoder.to(accelerator.device)
 		ds_loader = accelerator.prepare(ds_loader)
 	
 	# Predict for each sample output by each library
@@ -108,13 +188,19 @@ def evaluate(args, logger):
 			smoothing=0.04,
 			disable=not accelerator.is_main_process,
 	):
+		
 		inputs = batch["input_ids"][:, :batch["input_len"]]  # this removes the padding tokens on the right
 		# Since we are loading 1 sample batch per gpu
 		num_tokens = len(inputs[0])
 		
+		# Get the encoder
+		soft_prompt = encoder(input_ids=batch["enc_input_ids"], attention_mask=batch["enc_attention_mask"])
+		decoder.soft_prompt = soft_prompt
+		
 		# Skip the samples for which number of tokens in the input exceeds the max_length
 		if num_tokens >= args.max_length:
-			logger.info(f"Skipping task {batch['task_id'][0]} as the input length ={num_tokens} exceeds max_length ={args.max_length}")
+			logger.info(
+				f"Skipping task {batch['task_id'][0]} as the input length ={num_tokens} exceeds max_length ={args.max_length}")
 			gen_token_dict[batch["task_id"][0]].extend([[]] * args.num_return_sequences)
 			continue
 		
@@ -125,15 +211,13 @@ def evaluate(args, logger):
 		is_wrapped = args.load_in_8bit
 		if is_wrapped:
 			# 8bit and 4bit models are wrapped in accelerator
-			generated_tokens = accelerator.unwrap_model(model).generate(
+			generated_tokens = accelerator.unwrap_model(decoder).generate(
 				input_ids=inputs,
-				# attention_mask=batch["attention_mask"],
 				**kwargs
 			)
 		else:
-			generated_tokens = model.generate(
+			generated_tokens = decoder.generate(
 				input_ids=inputs,
-				# attention_mask=batch["attention_mask"],
 				**kwargs
 			)
 		
@@ -150,7 +234,7 @@ def evaluate(args, logger):
 		
 		for task_idx, generated_tokens in zip(generated_tasks, generated_tokens):
 			gen_token_dict[task_idx].append(generated_tokens)
-		
+	
 	code_gens, code_gens_raw = decode_cruxeval_predictions(gen_token_dict, tokenizer, dataset)
 	references = {
 		dataset.idx_to_id[row_idx]: dataset.task.get_reference(dataset.data[dataset.idx_to_pos[row_idx]])
@@ -158,7 +242,6 @@ def evaluate(args, logger):
 	}
 	
 	if accelerator.is_main_process:
-		
 		with open(os.path.join(args.log_dir, 'output.json'), 'w') as f:
 			json.dump(code_gens, f, indent=4)
 		logger.info(f"Saved the output in {args.log_dir}")

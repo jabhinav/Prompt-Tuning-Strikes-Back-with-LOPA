@@ -9,7 +9,7 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
 
-from peft import LoraConfig, get_peft_model, PeftModel
+from peft import PeftModel
 from utils.config import get_config
 from utils.eval import decode_cruxeval_predictions
 from torch.utils.data.dataloader import DataLoader
@@ -145,7 +145,7 @@ def evaluate(args, logger):
 	for step, batch in tqdm(
 			enumerate(ds_loader),
 			total=math.ceil(len(dataset) / accelerator.num_processes),
-			desc="Generating Predictions",
+			desc=f"Generating Predictions (for {args.cruxeval_task})",
 			colour="GREEN",
 			# leave=False,
 			dynamic_ncols=True,

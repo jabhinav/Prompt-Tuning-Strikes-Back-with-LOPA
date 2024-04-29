@@ -180,7 +180,7 @@ def evaluate(args, logger):
 	for step, batch in tqdm(
 			enumerate(ds_loader),
 			total=math.ceil(len(dataset) / accelerator.num_processes),
-			desc="Generating Predictions",
+			desc=f"Generating Predictions (for {args.cruxeval_task})",
 			colour="GREEN",
 			# leave=False,
 			dynamic_ncols=True,

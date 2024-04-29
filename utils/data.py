@@ -450,6 +450,7 @@ class CruxEval_Dataset_wEnc(Dataset):
 		# Get the data
 		self.data = self.get_data()
 		logger.info(f"[INFO] Loaded the CruxEval task: {self.task_name}")
+		print(f"[INFO] Loaded the CruxEval task: {self.task_name}")
 		
 		# Get the mapping from the row index to the task_id
 		self.idx_to_id = self.get_index_to_id_mapping()
@@ -572,7 +573,7 @@ class CruxEval_Dataset_wEnc(Dataset):
 	def convert_examples_to_features(self):
 		inputs, labels, attn_masks, enc_inputs, enc_masks, row_idxs, input_lens = [], [], [], [], [], [], []
 		
-		pbar = tqdm(total=len(self), ncols=0, desc="Converting examples to features: ")
+		pbar = tqdm(total=len(self), ncols=0, desc=f"Converting examples to features (mode={self.mode}): ")
 		for i in range(len(self)):
 			sample = self.data[i]
 			label_contents = self.task.get_label(sample)
