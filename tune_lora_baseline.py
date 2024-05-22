@@ -1,5 +1,5 @@
 import os
-
+import sys
 import torch
 from accelerate.logging import MultiProcessAdapter
 from peft import LoraConfig, get_peft_model, PeftModel
@@ -154,5 +154,5 @@ def main():
 
 
 if __name__ == '__main__':
-	# To run with accelerate, $ accelerate launch --config_file ds_zero3_cpu_nofp16.yaml tune_lora_baseline.py
+	# To run with accelerate, $ accelerate launch --config_file config_ds_zero_stage2_no_fp16.yaml tune_lora_baseline.py
 	main()

@@ -9,12 +9,13 @@ import transformers
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
+from transformers.modeling_utils import load_sharded_checkpoint
 
 from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftModel
 from utils.config import get_config
 from utils.eval import save_predictions_mbxp_format, decode_predictions
 from torch.utils.data.dataloader import DataLoader
-from utils.data import MBPP_Dataset_wEnc_Augmented as CustomDataset
+from utils.data import MBPP_Dataset_wEnc as CustomDataset
 from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
 
 
@@ -27,6 +28,15 @@ def load_model(args, logger, accelerator):
 		model_path=args.model_name_or_path,
 		load_in_8bit=args.load_in_8bit
 	)
+	
+	# Larger models are sharded
+	if args.sharded_checkpoint_dir is not None:
+		# Ref: https://huggingface.co/docs/transformers/big_models
+		load_sharded_checkpoint(model, args.sharded_checkpoint_dir)
+		msg = "[INFO] Loaded the sharded checkpoint from: {}".format(args.sharded_checkpoint_dir)
+		logger.info(msg)
+		if accelerator.is_local_main_process:
+			print(msg)
 	
 	# Load checkpoint
 	if args.load_base_from_path is not None:
@@ -44,12 +54,7 @@ def load_model(args, logger, accelerator):
 		if accelerator.is_local_main_process:
 			print(message)
 	
-	if args.do_peft:
-		
-		if not os.path.exists(args.load_adapter_from):
-			logger.error("Please specify the correct path to load the model adapters from")
-			raise ValueError("Please specify the correct path to load the model adapters from")
-		
+	if args.load_adapter_from is not None:
 		# Get the config
 		peft_config = PromptTuningConfig(
 			task_type=TaskType.CAUSAL_LM,
@@ -87,7 +92,6 @@ def evaluate(args, logger):
 			tokenizer=tokenizer,
 			max_prompt_length=args.max_prompt_length,
 			max_length=args.max_length,
-			sample_problems=args.num_test_problems,
 			mode='test',
 			enc_tokenizer=enc_tokenizer,
 			

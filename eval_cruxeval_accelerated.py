@@ -17,6 +17,8 @@ from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
 
 from transformers import StoppingCriteria
 from torch import LongTensor, FloatTensor, eq
+from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftModel
+from transformers.modeling_utils import load_sharded_checkpoint
 
 
 def load_model(args, logger, accelerator):
@@ -27,6 +29,51 @@ def load_model(args, logger, accelerator):
 		model_path=args.model_name_or_path,
 		load_in_8bit=args.load_in_8bit
 	)
+	
+	# Larger models are sharded
+	if args.sharded_checkpoint_dir is not None:
+		# Ref: https://huggingface.co/docs/transformers/big_models
+		load_sharded_checkpoint(model, args.sharded_checkpoint_dir)
+		msg = "[INFO] Loaded the sharded checkpoint from: {}".format(args.sharded_checkpoint_dir)
+		logger.info(msg)
+		if accelerator.is_local_main_process:
+			print(msg)
+	
+	# Load checkpoint for smaller models
+	if args.load_base_from_path is not None:
+		# We load the model state dict on the CPU to avoid an OOM error.
+		loaded_state_dict = torch.load(args.load_base_from_path, map_location="cpu")
+		loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
+		model.load_state_dict(loaded_state_dict, strict=True)
+		
+		# release memory
+		del loaded_state_dict
+		
+		# Log the loaded checkpoint
+		message = "[INFO] Loaded model checkpoint from path: {}".format(args.load_base_from_path)
+		logger.info(message)
+		if accelerator.is_local_main_process:
+			print(message)
+	
+	if args.load_adapter_from is not None:
+		# Get the config
+		peft_config = PromptTuningConfig(
+			task_type=TaskType.CAUSAL_LM,
+			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
+			num_virtual_tokens=args.num_virtual_tokens,
+		)
+		
+		# Load the model adapters - in place
+		model = PeftModel.from_pretrained(
+			model=model,
+			model_id=args.load_adapter_from,  # Must be a directory containing the model files
+			config=peft_config,
+		)
+		msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
+		logger.info(msg)
+		if accelerator.is_local_main_process:
+			print(msg)
+	
 	return model
 
 

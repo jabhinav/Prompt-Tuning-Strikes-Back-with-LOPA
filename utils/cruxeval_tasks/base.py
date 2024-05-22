@@ -80,12 +80,14 @@ class Task(ABC):
         pass
 
     @abstractmethod
-    def postprocess_generation(self, generation, idx):
+    def postprocess_generation(self, generation, idx, gen_with_prompt_removed=None):
         """Defines the postprocessing for a LM generation.
         :param generation: str
             code generation from LM
         :param idx: int
             index of doc in the dataset to which the generation belongs
+        :param gen_with_prompt_removed: str
+            generation with prompt removed (will be used instead of generation if provided)
         """
         pass
 

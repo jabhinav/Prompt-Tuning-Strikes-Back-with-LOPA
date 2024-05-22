@@ -41,6 +41,7 @@ class Trainer(BaseTrainer):
 			if is_rank_0():
 				print(msg)
 		
+		self.logger.info("Initialized the encoder.")
 		return model
 	
 	def init_decoder(self):
@@ -98,7 +99,7 @@ class Trainer(BaseTrainer):
 		# This should match dimensions of torch.nn.Embedding(total_virtual_tokens, config.token_dim)
 		self.args.total_virtual_tokens = self.args.num_virtual_tokens * peft_config.num_transformer_submodules
 		self.args.word_embedding_dim = peft_config.token_dim
-		
+		self.logger.info("Initialized the decoder.")
 		return model
 	
 	def _build_model(self):

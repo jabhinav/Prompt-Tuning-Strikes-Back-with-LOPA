@@ -140,7 +140,6 @@ class BaseTrainer(object):
 					tokenizer=self.tokenizer,
 					max_prompt_length=self.args.max_prompt_length,
 					max_length=self.args.max_length,
-					sample_problems=self.args.num_train_problems,
 					mode='train',
 					enc_tokenizer=self.enc_tokenizer,
 				)
@@ -154,6 +153,8 @@ class BaseTrainer(object):
 					prefix=self.args.prefix,
 					cot=self.args.cot,
 				)
+			else:
+				raise ValueError(f"Invalid dataset name: {self.args.dataset_name}")
 		
 		# Prepare training data loader
 		sampler = RandomSampler(dataset)

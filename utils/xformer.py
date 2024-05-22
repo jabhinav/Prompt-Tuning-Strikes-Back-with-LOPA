@@ -24,10 +24,15 @@ MODEL_CLASSES = {
 	'bert': (BertConfig, BertForMaskedLM),
 	'distilbert': (DistilBertConfig, DistilBertForMaskedLM),
 	'codebert-base': (AutoConfig, AutoModel),
+	# ############################# Codesage encoder-only Models ############################## #
+	'codesage-base': (AutoConfig, AutoModel),
+	'codesage-small': (AutoConfig, AutoModel),
+	'codesage-large': (AutoConfig, AutoModel),
 	# ############################# Microsoft Phi Models ############################## #
 	'phi-1': (AutoConfig, AutoModelForCausalLM),
 	'phi-1_5': (AutoConfig, AutoModelForCausalLM),
 	'phi-2': (AutoConfig, AutoModelForCausalLM),
+	'phi-3': (AutoConfig, AutoModelForCausalLM),
 	# ############################# Salesforce CodeT5 Models ############################# #
 	'codet5-small': (T5Config, T5ForConditionalGeneration),
 	'codet5-base': (T5Config, T5ForConditionalGeneration),
@@ -52,6 +57,7 @@ MODEL_CLASSES = {
 	'CodeLlama-7b-Python-hf': (AutoConfig, AutoModelForCausalLM),
 	'CodeLlama-13b-Python-hf': (AutoConfig, AutoModelForCausalLM),
 	'CodeLlama-34b-Python-hf': (AutoConfig, AutoModelForCausalLM),
+	'Meta-Llama-3-8B': (AutoConfig, AutoModelForCausalLM),
 	# ############################# DeepSeek-Coder Models ############################# #
 	'deepseek-coder-1.3b-base': (AutoConfig, AutoModelForCausalLM),
 	'deepseek-coder-7b-base': (AutoConfig, AutoModelForCausalLM),
@@ -81,6 +87,9 @@ LORA_IA3_TARGET_MODULES = {
 	# ############################# Microsoft Phi Models ############################## #
 	"phi-2": {
 		"target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+	},
+	"phi-3": {
+		"target_modules_lora": ["qkv_proj"],
 	},
 	# ############################# Salesforce CodeT5 Models ############################# #
     "codet5p-220m": {
@@ -128,6 +137,9 @@ LORA_IA3_TARGET_MODULES = {
 	"deepseek-coder-1.3b-base": {
 		"target_modules_lora": ["q_proj", "k_proj", "v_proj"],
 	},
+	"deepseek-coder-7b-base": {
+		"target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+	},
 	# ############################# Meta LLama Models ############################# #
     "CodeLlama-7b-hf": {
         "target_modules_lora": ["q_proj", "k_proj", "v_proj"],
@@ -153,7 +165,10 @@ LORA_IA3_TARGET_MODULES = {
         "target_modules_lora": ["q_proj", "k_proj", "v_proj"],
         "target_modules_ia3": ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
         "ff_modules": ["gate_proj", "up_proj", "down_proj"]
-    }
+    },
+	"Meta-Llama-3-8B": {
+		"target_modules_lora": ["q_proj", "k_proj", "v_proj"],
+	},
 }
 
 
@@ -207,7 +222,8 @@ def load_base_model(model_type, config_name, model_path, load_in_8bit: bool = Fa
 		model_path,
 		trust_remote_code=True,
 		revision="main",
-		load_in_8bit=load_in_8bit
+		load_in_8bit=load_in_8bit,
+	    # torch_dtype="auto"
 	)
 	
 	if is_rank_0():
@@ -229,7 +245,14 @@ def get_huggingface_path(model: str) -> str:
 		huggingface_path = 'EleutherAI/gpt-neo-1.3B'  # 'EleutherAI/gpt-neo-1.3B' or 'EleutherAI/gpt-neo-2.7B'
 	# ############################# Microsoft BERT Models ############################# #
 	elif model == 'codebert-base' or model == 'codebert':
-		huggingface_path = 'microsoft/codebert-base'
+		huggingface_path = 'microsoft/codebert-base'  # 125M
+	# ############################# Codesage Models ############################# #
+	elif model == 'codesage-base':
+		huggingface_path = 'codesage/codesage-base'  # 365M
+	elif model == 'codesage-small':
+		huggingface_path = 'codesage/codesage-small'  # 130M
+	elif model == 'codesage-large':
+		huggingface_path = 'codesage/codesage-large'  # 1.3B
 	# ############################# Microsoft Phi Models ############################## #
 	elif model == 'phi-1':
 		huggingface_path = 'microsoft/phi-1'  # 1.3B
@@ -237,6 +260,8 @@ def get_huggingface_path(model: str) -> str:
 		huggingface_path = 'microsoft/phi-1_5'  # 1.3B + augmented with a new data source (NLP synthetic texts)
 	elif model == 'phi-2':
 		huggingface_path = 'microsoft/phi-2'  # 2.7B + augmented with new data sources (NLP synthetic texts + websites)
+	elif model == 'phi-3':
+		huggingface_path = 'microsoft/Phi-3-mini-4k-instruct'  # 3.8B + larger and more advanced versions of the datasets used in phi-2.
 	# ############################# Salesforce CodeT5 Models ############################# #
 	elif model == 'codet5-base':
 		huggingface_path = 'Salesforce/codet5-base'  # (220M)
@@ -279,7 +304,9 @@ def get_huggingface_path(model: str) -> str:
 	elif model == 'CodeLlama-13b-Python-hf':
 		huggingface_path = 'codellama/CodeLlama-13b-Python-hf'
 	elif model == 'CodeLlama-34b-Python-hf':
-		huggingface_path = 'codellama/CodeLlama-34b-Python-hf'
+		huggingface_path = 'codellama/CodeLlama-34b-Python-hf'  # 70b is only provided when requested
+	elif model == 'Meta-Llama-3-8B':
+		huggingface_path = 'meta-llama/Meta-Llama-3-8B'
 	# ############################# DeepSeek-Coder Models ############################# #
 	elif model == 'deepseek-coder-1.3b-base':
 		huggingface_path = 'deepseek-ai/deepseek-coder-1.3b-base'

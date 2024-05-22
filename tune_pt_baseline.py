@@ -47,7 +47,7 @@ class Trainer(BaseTrainer):
 				print(msg)
 		
 		# Get the config
-		peft_config = PromptTuningConfig(
+		pt_config = PromptTuningConfig(
 			task_type=TaskType.CAUSAL_LM,
 			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
 			num_virtual_tokens=args.num_virtual_tokens,
@@ -58,18 +58,18 @@ class Trainer(BaseTrainer):
 			model = PeftModel.from_pretrained(
 				model=model,
 				model_id=args.load_adapter_from,  # Must be a directory containing the model files
-				config=peft_config,
+				config=pt_config,
 			)
 			msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
 			if is_rank_0():
 				print(msg)
 		else:
 			# Initialize the model adapters
-			model = get_peft_model(model, peft_config)
+			model = get_peft_model(model, pt_config)
 		
 		# This should match dimensions of torch.nn.Embedding(total_virtual_tokens, config.token_dim)
-		self.args.total_virtual_tokens = self.args.num_virtual_tokens * peft_config.num_transformer_submodules
-		self.args.word_embedding_dim = peft_config.token_dim
+		self.args.total_virtual_tokens = self.args.num_virtual_tokens * pt_config.num_transformer_submodules
+		self.args.word_embedding_dim = pt_config.token_dim
 		
 		return model
 	
@@ -83,7 +83,7 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_peft"}}
+				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_pt"}}
 			)
 	
 	def count_parameters(self):

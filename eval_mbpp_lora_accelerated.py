@@ -14,7 +14,7 @@ from peft import PeftModel
 from utils.config import get_config
 from utils.eval import save_predictions_mbxp_format, decode_predictions
 from torch.utils.data.dataloader import DataLoader
-from utils.data import MBPP_Dataset_wEnc_Augmented as CustomDataset
+from utils.data import MBPP_Dataset_wEnc as CustomDataset
 from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
 
 
@@ -87,7 +87,6 @@ def evaluate(args, logger):
 		tokenizer=dec_tokenizer,
 		max_prompt_length=args.max_prompt_length,
 		max_length=args.max_length,
-		sample_problems=args.num_test_problems,
 		mode='test',
 		enc_tokenizer=enc_tokenizer,
 		

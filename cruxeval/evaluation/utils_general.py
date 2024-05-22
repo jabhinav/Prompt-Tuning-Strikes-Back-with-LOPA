@@ -22,17 +22,25 @@ def pass_at_k(n, c, k):
 
 
 def evaluate_score(args):
-    gs, (c, i, o), mode = args
+    gs, (c, i, o), mode, timeout = args
 
     execution_results = []
+    # Loop over all generations for this sample
     for g in gs:
-        if mode == "input" and "f(" not in g:
+        if mode == "input" and "f(" not in g:  # You want f(input) to be present in the generation
             pass
-        elif mode == "output" and f"f({i})" in g:
+        elif mode == "output" and f"f({i})" in g:  # You don't want f(input) to be present in the generation
             pass
         else:
+            # g := f(input) # Predicated string
+            # assert gt_output == f(input) -> This will actually run the code against the input
+            # g := output # Predicated string
+            # assert gt_output == output -> This will just match the pred. str with the output
             code_to_execute = f"{c}\nassert {o} == {g}"
-            execution_results.append(check_correctness(code_to_execute, 3))
+            execution_results.append(check_correctness(code_to_execute, timeout))
+    
+    # If no correct generation is found, return False i.e. pass@k = 0 for this sample
     if True not in execution_results:
         execution_results = [False] * len(gs)
+    
     return execution_results

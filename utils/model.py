@@ -44,7 +44,7 @@ def get_clf_embedding(args, model, prompt, prompt_mask, response, library_idx):
 
 
 class LatentPromptAttentionGenerator(torch.nn.Module):
-	def __init__(self, args, n_virtual_tokens, word_embedding_dim, freeze_base=False):
+	def __init__(self, args, n_virtual_tokens, word_embedding_dim, use_bias=True, freeze_base=True):
 		super(LatentPromptAttentionGenerator, self).__init__()
 		
 		config, base = load_base_model(
@@ -56,11 +56,15 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 		self.config = config
 		self.base = base  # CodeBERT model
 		self.freeze_base = freeze_base
+		self.rank = self.args.lp_rank
 		
 		# # Base model does not require any training - freeze the weights
 		if self.freeze_base:
+			print("[INFO] Freezing the Enc base model weights")
 			for param in self.base.parameters():
 				param.requires_grad = False
+		else:
+			print("[INFO] Tuning the Enc base model weights")
 		
 		# For each virtual token, predict a word embedding - mu and logvar
 		self.n_virtual_tokens = n_virtual_tokens
@@ -74,12 +78,12 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 		# Define the head for encoding the row vectors - weighs virtual tokens
 		self.row_dropout = torch.nn.Dropout(dropout_prob)
 		self.row_dense = torch.nn.Linear(hidden_dim, hidden_dim)
-		self.row_out_proj = torch.nn.Linear(hidden_dim, n_virtual_tokens)
+		self.row_out_proj = torch.nn.Linear(hidden_dim, n_virtual_tokens * self.rank, bias=use_bias)
 		
 		# Define the head for encoding the column vectors - weighs the word embedding dimensions
 		self.col_dropout = torch.nn.Dropout(dropout_prob)
 		self.col_dense = torch.nn.Linear(hidden_dim, hidden_dim)
-		self.col_out_proj = torch.nn.Linear(hidden_dim, word_embedding_dim)
+		self.col_out_proj = torch.nn.Linear(hidden_dim, word_embedding_dim * self.rank, bias=use_bias)
 		
 		self.init_predictor_head()
 	
@@ -111,6 +115,10 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 		
 		elif self.args.enc_model_type == 'codet5p-110m-embedding':
 			x = self.base(input_ids, attention_mask=attention_mask)
+			
+		elif self.args.enc_model_type in ['codesage-base', 'codesage-small', 'codesage-large']:
+			x = self.base(input_ids, attention_mask=attention_mask, return_dict=True)
+			x = torch.nn.functional.normalize(x.pooler_output, p=2, dim=1)
 		
 		else:
 			# Should be used for decoder models
@@ -144,15 +152,20 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 		row_weights = self.row_dense(row_weights)
 		row_weights = torch.nn.functional.tanh(row_weights)
 		row_weights = self.row_out_proj(row_weights)
+		row_weights = row_weights.view(-1, self.n_virtual_tokens, self.rank)
 		
 		# Predict the column weights
 		col_weights = self.col_dropout(x)
 		col_weights = self.col_dense(col_weights)
 		col_weights = torch.nn.functional.tanh(col_weights)
 		col_weights = self.col_out_proj(col_weights)
+		col_weights = col_weights.view(-1, self.word_embedding_dim, self.rank)
 		
-		# Multiply: uk ∈ R^l, vk ∈ R^d -> uk * vk^T ∈ R^(l x d)
-		prompt_specific_clf_embedding = torch.einsum('bi,bj->bij', row_weights, col_weights)
+		# [Older, for r=1] Multiply: uk ∈ R^l, vk ∈ R^d -> uk * vk^T ∈ R^(l x d)
+		# prompt_specific_clf_embedding = torch.einsum('bi,bj->bij', row_weights, col_weights)
+		
+		# [Latest, for r>=1] Multiply: uk ∈ R^l x r, vk ∈ R^d x r -> uk * vk^T ∈ R^(l x d)
+		prompt_specific_clf_embedding = torch.einsum('bir,bjr->bij', row_weights, col_weights)
 		
 		return prompt_specific_clf_embedding
 	
@@ -164,7 +177,7 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 
 
 class IDPGSoftPromptGenerator(torch.nn.Module):
-	def __init__(self, args, n_virtual_tokens, word_embedding_dim):
+	def __init__(self, args, n_virtual_tokens, word_embedding_dim, use_bias=True):
 		super(IDPGSoftPromptGenerator, self).__init__()
 		
 		# In IDPG, the encoder is the same as the decoder
@@ -192,8 +205,8 @@ class IDPGSoftPromptGenerator(torch.nn.Module):
 		
 		# Define the head for encoding all virtual tokens
 		self._dropout = torch.nn.Dropout(dropout_prob)
-		self.layer_down_project = torch.nn.Linear(hidden_dim, hidden_dim, bias=True)
-		self.layer_up_project = torch.nn.Linear(hidden_dim, n_virtual_tokens * word_embedding_dim, bias=True)
+		self.layer_down_project = torch.nn.Linear(hidden_dim, hidden_dim, bias=use_bias)
+		self.layer_up_project = torch.nn.Linear(hidden_dim, n_virtual_tokens * word_embedding_dim, bias=use_bias)
 		
 		self.init_predictor_head()
 	
@@ -218,6 +231,10 @@ class IDPGSoftPromptGenerator(torch.nn.Module):
 		
 		elif self.args.enc_model_type == 'codet5p-110m-embedding':
 			x = self.base(input_ids, attention_mask=attention_mask)
+			
+		elif self.args.enc_model_type in ['codesage-base', 'codesage-small', 'codesage-large']:
+			x = self.base(input_ids, attention_mask=attention_mask, return_dict=True)
+			x = torch.nn.functional.normalize(x.pooler_output, p=2, dim=1)
 		
 		else:
 			# Should be used for decoder models

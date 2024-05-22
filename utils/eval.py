@@ -168,7 +168,11 @@ def decode_cruxeval_predictions(gen_token_dict, tokenizer, dataset: CruxEval_Dat
 				pass
 
 			# Post-process the generated text
-			processed_text = dataset.task.postprocess_generation(gen_text, _idx)
+			try:
+				processed_text = dataset.task.postprocess_generation(gen_text, _idx)
+			except:
+				print(f"Error in postprocessing for {_idx}")
+				processed_text = ""
 			
 			code_gens_raw[dataset.idx_to_id[_idx]].append(gen_text)
 			code_gens[dataset.idx_to_id[_idx]].append(processed_text)

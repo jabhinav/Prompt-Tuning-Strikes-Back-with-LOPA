@@ -184,12 +184,12 @@ def main():
 	logger = MultiProcessAdapter(logger, {})  # An adapter to assist with logging in multiprocess.
 	
 	# To force the encoder to be same as the decoder
-	args.enc_model_type = args.model_type
+	# args.enc_model_type = args.model_type
 	
 	trainer = Trainer(args, logger)
 	trainer.train_loop()
 
 
 if __name__ == '__main__':
-	# To run with accelerate, $ accelerate launch --config_file basic_nofp16.yaml tune_idpg_baseline.py --do_peft 1
+	# To run with accelerate, $ accelerate launch --config_file config_ds_zero_stage2_no_fp16.yaml tune_idpg_baseline.py
 	main()

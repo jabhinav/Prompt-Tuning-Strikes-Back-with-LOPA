@@ -56,21 +56,25 @@ class OutputPrediction(Task):
     def get_reference(self, doc):
         return (doc["code"], doc["input"], doc["output"])
 
-    def postprocess_generation(self, generation, idx):
-        # Remove the prompt from the generation
-        prompt = self.get_prompt(self.get_dataset()[idx])
-        try:
-            assert generation.startswith(prompt)
-        except AssertionError:
-            # Check if there is any non-ascii character in the prompt.
-            # Sometimes non-ascii chars in the prompt after encoding and decoding change
-            prompt_wo_ascii = prompt.encode('ascii', 'ignore').decode('ascii')
-            generation_wo_ascii = generation.encode('ascii', 'ignore').decode('ascii')
-            assert generation_wo_ascii.startswith(prompt_wo_ascii)  # This should raise an exception if the prompt is not found in the generation even after removing non-ascii chars
-        finally:
-            # This will be executed only if the assert statement is not raised inside the except block
-            generation = generation[len(prompt):]
-
+    def postprocess_generation(self, generation, idx, gen_with_prompt_removed=None):
+        
+        if gen_with_prompt_removed is None:
+            # Remove the prompt from the generation
+            prompt = self.get_prompt(self.get_dataset()[idx])
+            try:
+                assert generation.startswith(prompt)
+            except AssertionError:
+                # Check if there is any non-ascii character in the prompt.
+                # Sometimes non-ascii chars in the prompt after encoding and decoding change
+                prompt_wo_ascii = prompt.encode('ascii', 'ignore').decode('ascii')
+                generation_wo_ascii = generation.encode('ascii', 'ignore').decode('ascii')
+                assert generation_wo_ascii.startswith(prompt_wo_ascii)  # This should raise an exception if the prompt is not found in the generation even after removing non-ascii chars
+            finally:
+                # This will be executed only if the assert statement is not raised inside the except block
+                generation = generation[len(prompt):]
+        else:
+            generation = gen_with_prompt_removed
+        
         if self.cot:
             # Get the string after the [ANSWER] token
             if "[ANSWER]" in generation:

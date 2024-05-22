@@ -145,14 +145,14 @@ class MBPP_Dataset(BaseDataset):
 			max_prompt_length: int = 512,
 			max_length: int = 512,
 			mode: str = 'train',
-			sample_problems: Union[int, None] = None,
+			# sample_problems: Union[int, None] = None,
 			split: float = 0.5,
 			finer_split: float = 1.0,
 			use_first_half: bool = True,
 	):
 		# # Initialize mode before calling super().__init__
 		# max_length=2048 if ('EleutherAI' in args.arch or '2700' in args.load) else 1024 <- From APPS github repo
-		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
+		# self.sample_problems = sample_problems  # Number of problems to sample from the dataset
 		self.split = split
 		
 		# Use the first <finer_split> fraction of the data as training-1 and the rest as training-2
@@ -201,19 +201,20 @@ class MBPP_Dataset_wEnc(BaseDataset):
 			max_length: int = 512,
 			mode: str = 'train',
 			enc_tokenizer=None,
-			sample_problems: Union[int, None] = None,
 			split: float = 0.5,
 			finer_split: float = 1.0,
 			use_first_half: bool = True,
 	):
 		# # Initialize mode before calling super().__init__
 		# max_length=2048 if ('EleutherAI' in args.arch or '2700' in args.load) else 1024 <- From APPS github repo
-		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
+		# self.sample_problems = sample_problems  # Number of problems to sample from the dataset
 		self.split = split
 		
 		# Use the first <finer_split> fraction of the data as training-1 and the rest as training-2
 		self.finer_split = finer_split
 		self.use_first_half = use_first_half
+		
+		self.max_enc_length = 512  # set this based on the encoder tokenizer
 		
 		self.enc_tokenizer = enc_tokenizer
 		
@@ -262,22 +263,22 @@ class MBPP_Dataset_wEnc(BaseDataset):
 		# For encoder-only models that are designed for language understanding tasks
 		if ((hasattr(self.enc_tokenizer, 'cls_token') and self.enc_tokenizer.cls_token is not None) and
 				(hasattr(self.enc_tokenizer, 'sep_token') and self.enc_tokenizer.sep_token is not None)):
-			max_bert_length = self.max_prompt_length - 2  # [CLS] and [SEP]
+			max_bert_length = self.max_enc_length - 2  # [CLS] and [SEP]
 			src_tokens = src_tokens[-max_bert_length:]  # Truncate the prompt from left
 			src_tokens = [self.enc_tokenizer.cls_token] + src_tokens + [self.enc_tokenizer.sep_token]
 			src_token_ids = self.enc_tokenizer.convert_tokens_to_ids(src_tokens)
 			
 			# Pad from right (should be fine even when encoder is a causal LM)
-			pad_length = self.max_prompt_length - len(src_token_ids)
+			pad_length = self.max_enc_length - len(src_token_ids)
 			src_token_ids = src_token_ids + [self.enc_tokenizer.pad_token_id] * pad_length
 		
 		# For all other models
 		else:
-			src_tokens = src_tokens[-self.max_prompt_length:]
+			src_tokens = src_tokens[-self.max_enc_length:]
 			src_token_ids = self.enc_tokenizer.convert_tokens_to_ids(src_tokens)
 			
 			# Pad from left
-			pad_length = self.max_prompt_length - len(src_token_ids)
+			pad_length = self.max_enc_length - len(src_token_ids)
 			src_token_ids = [self.enc_tokenizer.pad_token_id] * pad_length + src_token_ids
 		
 		# Convert to tensors
@@ -318,93 +319,7 @@ class MBPP_Dataset_wEnc(BaseDataset):
 				"attention_mask": src_mask,
 				"task_id": idx  # We can only provide int as task_id. Map later!
 			}
-
-
-class MBPP_Dataset_wEnc_Augmented(BaseDataset, IterableDataset):
-	def __init__(
-			self,
-			path_to_data: str,
-			tokenizer: Any,
-			max_prompt_length: int = 512,
-			max_length: int = 512,
-			mode: str = 'test',
-			enc_tokenizer=None,
-			sample_problems: Union[int, None] = None,
-			split: float = 0.5,
-			finer_split: float = 1.0,
-			use_first_half: bool = True,
-	):
-		# # Initialize mode before calling super().__init__
-		# max_length=2048 if ('EleutherAI' in args.arch or '2700' in args.load) else 1024 <- From APPS github repo
-		self.sample_problems = sample_problems  # Number of problems to sample from the dataset
-		self.split = split
-		
-		# Use the first <finer_split> fraction of the data as training-1 and the rest as training-2
-		self.finer_split = finer_split
-		self.use_first_half = use_first_half
-		
-		self.enc_tokenizer = enc_tokenizer
-		
-		if self.mode == 'train':
-			raise ValueError("This dataset is only for testing.")
-		
-		super().__init__(path_to_data, tokenizer, max_prompt_length, max_length, mode)
 	
-	def read_data(self):
-		
-		# Read the MBPP data
-		with open(self.path_to_data, 'r') as f:
-			data = f.readlines()
-		
-		data = [json.loads(d) for d in data]
-		data = data[int(self.split * len(data)):]
-		
-		partitioned_data = {}
-		for problem in tqdm(data, ncols=0, total=len(data),
-							desc="Reading MBPP examples from {} (mode = {}): ".format(self.path_to_data,
-																					  self.mode)):
-			f_id = problem['task_id']
-			q_str = problem['prompt']
-			a_str = problem['canonical_solution']
-			partitioned_data[f_id] = (q_str, a_str)
-		
-		return partitioned_data
-	
-	def get_enc_ip(self, idx):
-		
-		if self.enc_tokenizer is None:
-			raise ValueError("Encoder tokenizer not provided. Even if not required, provide a dummy tokenizer.")
-		
-		q_str, _ = self.data[self.ids[idx]]
-		src_tokens = self.enc_tokenizer.tokenize(q_str)
-		
-		# For encoder-only models that are designed for language understanding tasks
-		if ((hasattr(self.enc_tokenizer, 'cls_token') and self.enc_tokenizer.cls_token is not None) and
-				(hasattr(self.enc_tokenizer, 'sep_token') and self.enc_tokenizer.sep_token is not None)):
-			max_bert_length = self.max_prompt_length - 2  # [CLS] and [SEP]
-			src_tokens = src_tokens[-max_bert_length:]  # Truncate the prompt from left
-			src_tokens = [self.enc_tokenizer.cls_token] + src_tokens + [self.enc_tokenizer.sep_token]
-			src_token_ids = self.enc_tokenizer.convert_tokens_to_ids(src_tokens)
-			
-			# Pad from right (should be fine even when encoder is a causal LM)
-			pad_length = self.max_prompt_length - len(src_token_ids)
-			src_token_ids = src_token_ids + [self.enc_tokenizer.pad_token_id] * pad_length
-		
-		# For all other models
-		else:
-			src_tokens = src_tokens[-self.max_prompt_length:]
-			src_token_ids = self.enc_tokenizer.convert_tokens_to_ids(src_tokens)
-			
-			# Pad from left
-			pad_length = self.max_prompt_length - len(src_token_ids)
-			src_token_ids = [self.enc_tokenizer.pad_token_id] * pad_length + src_token_ids
-		
-		# Convert to tensors
-		src_token_ids = torch.LongTensor(src_token_ids)
-		src_mask = src_token_ids.ne(self.enc_tokenizer.pad_token_id)  # mask out padding
-		
-		return src_token_ids, src_mask
-
 	def __iter__(self):
 		
 		for idx in range(len(self)):
@@ -412,16 +327,28 @@ class MBPP_Dataset_wEnc_Augmented(BaseDataset, IterableDataset):
 			
 			# Get the input for CodeBERT
 			enc_input_ids, enc_mask = self.get_enc_ip(idx)
-			src_input_ids, src_mask = super().sample(idx)
 			
-			yield {
-				"enc_input_ids": enc_input_ids,
-				"enc_attention_mask": enc_mask,
-				"input_ids": src_input_ids,
-				"attention_mask": src_mask,
-				"task_id": idx  # We can only provide int as task_id. Map later!
-			}
+			if self.mode == 'train':
+				src_input_ids, src_mask, trg_label_ids, trg_mask = super().sample(idx)
+				yield {
+					"enc_input_ids": enc_input_ids,
+					"enc_attention_mask": enc_mask,
+					"input_ids": src_input_ids,
+					"attention_mask": src_mask,
+					"labels": trg_label_ids,
+					"task_id": idx  # We can only provide int as task_id. Map later!
+				}
 			
+			else:
+				src_input_ids, src_mask = super().sample(idx)
+				yield {
+					"enc_input_ids": enc_input_ids,
+					"enc_attention_mask": enc_mask,
+					"input_ids": src_input_ids,
+					"attention_mask": src_mask,
+					"task_id": idx  # We can only provide int as task_id. Map later!
+				}
+				
 			
 class CruxEval_Dataset_wEnc(Dataset):
 	"""
@@ -436,6 +363,7 @@ class CruxEval_Dataset_wEnc(Dataset):
 		self.tokenizer = tokenizer
 		self.enc_tokenizer = enc_tokenizer
 		self.max_length = max_length
+		self.max_enc_length = 512  # set this based on the encoder tokenizer
 		
 		self.prefix = prefix
 		self.cot = cot
@@ -452,7 +380,7 @@ class CruxEval_Dataset_wEnc(Dataset):
 		logger.info(f"[INFO] Loaded the CruxEval task: {self.task_name}")
 		print(f"[INFO] Loaded the CruxEval task: {self.task_name}")
 		
-		# Get the mapping from the row index to the task_id
+		# Get the mapping from the row index to the task_id. Ex: {400: 'sample_400'}
 		self.idx_to_id = self.get_index_to_id_mapping()
 		
 		# Get the mapping from sample position in the dataset to the row index
@@ -546,22 +474,22 @@ class CruxEval_Dataset_wEnc(Dataset):
 		# For encoder-only models that are designed for language understanding tasks
 		if ((hasattr(self.enc_tokenizer, 'cls_token') and self.enc_tokenizer.cls_token is not None) and
 				(hasattr(self.enc_tokenizer, 'sep_token') and self.enc_tokenizer.sep_token is not None)):
-			max_bert_length = self.max_length - 2  # [CLS] and [SEP]
+			max_bert_length = self.max_enc_length - 2  # [CLS] and [SEP]
 			src_tokens = src_tokens[-max_bert_length:]  # Truncate the prompt from left
 			src_tokens = [self.enc_tokenizer.cls_token] + src_tokens + [self.enc_tokenizer.sep_token]
 			src_token_ids = self.enc_tokenizer.convert_tokens_to_ids(src_tokens)
 			
 			# Pad from right (should be fine even when encoder is a causal LM)
-			pad_length = self.max_length - len(src_token_ids)
+			pad_length = self.max_enc_length - len(src_token_ids)
 			src_token_ids = src_token_ids + [self.enc_tokenizer.pad_token_id] * pad_length
 		
 		# For all other models
 		else:
-			src_tokens = src_tokens[-self.max_length:]
+			src_tokens = src_tokens[-self.max_enc_length:]
 			src_token_ids = self.enc_tokenizer.convert_tokens_to_ids(src_tokens)
 			
 			# Pad from left
-			pad_length = self.max_length - len(src_token_ids)
+			pad_length = self.max_enc_length - len(src_token_ids)
 			src_token_ids = [self.enc_tokenizer.pad_token_id] * pad_length + src_token_ids
 		
 		# Convert to tensors
