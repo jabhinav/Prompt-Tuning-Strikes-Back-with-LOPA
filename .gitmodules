@@ -1,0 +1,3 @@
+[submodule "LOPA-NLU"]
+	path = LOPA-NLU
+	url = https://github.com/jabhinav/Prompt-Tuning-Strikes-Back-with-LOPA-NLU.git
