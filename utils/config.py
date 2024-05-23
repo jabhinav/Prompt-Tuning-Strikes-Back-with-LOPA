@@ -16,16 +16,16 @@ def get_config():
 	parser = argparse.ArgumentParser()
 	
 	# #################################################### High-level ############################################### #
-	parser.add_argument("--peft_method", type=str, default='lopa',
+	parser.add_argument("--peft_method", type=str, default=None,
 						choices=['lopa', 'pt', 'idpg', 'lora'])
-	parser.add_argument("--task_name", type=str, default='cruxeval_input_prediction',
+	parser.add_argument("--task_name", type=str, default=None,
 						choices=['mbpp', 'cruxeval_input_prediction', 'cruxeval_output_prediction'])
 	parser.add_argument('--wandb_logging', type=bool, default=False)
 	parser.add_argument('--project_name', type=str, default='PromptTuningModel', help="Name of the wandb project")
 	parser.add_argument('--seed', type=int, default=9876, help="random seed for init.")
 	
 	# #################################################### Model #################################################### #
-	parser.add_argument("--model_type", type=str, default='codegen-350M',
+	parser.add_argument("--model_type", type=str, default=None,
 						choices=["phi-2", "phi-3", "codegen-350M", "codegen2-3_7B", "deepseek-coder-1.3b-base",
 								 "deepseek-coder-7b-base", "Meta-Llama-3-8B"])
 	parser.add_argument("--enc_model_type", type=str, default="codesage-small",
@@ -75,7 +75,7 @@ def get_config():
 						help='total of number checkpoints to keep; only keep the latest ones')  # Used by FFT
 	parser.add_argument("--log_interval", default=1, type=int,
 						help="Log every X updates steps.")  # Used by FFT
-	parser.add_argument("--huggingface_login_token", type=str, default='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',
+	parser.add_argument("--huggingface_login_token", type=str, default=None,
 						help="Hugging Face login token")
 	
 	# ############################################ Hardware configuration ########################################### #

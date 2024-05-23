@@ -19,7 +19,7 @@ for model in "${model_list[@]}"; do
 
             # ##################################### Train the model ################################################# #
             # For others
-            accelerate launch --config_file config_ds_zero_stage2_no_fp16.yaml tune_foundation_model.py --peft_method lopa --task_name "cruxeval_${task}_prediction" --lp_rank "$lp_rank" --log_dir "$log_dir" --model_type "$model"
+            accelerate launch --config_file config_files/config_ds_zero_stage2_no_fp16.yaml tune_foundation_model.py --peft_method lopa --task_name "cruxeval_${task}_prediction"--model_type "$model"  --lp_rank "$lp_rank" --log_dir "$log_dir"
 
             # For FFT [Uncomment]
 #            deepspeed tune_fft_baseline.py --path_to_ds_config ./zero_stage2_config.json --fp16 True --gradient_accumulation_steps 1  --log_dir "$log_dir" --model_type "$model" --task_name "cruxeval_${task}_prediction"
@@ -31,7 +31,7 @@ for model in "${model_list[@]}"; do
             # For others
             load_adapter_from="$log_dir/final/PEFT"
             clf_predictor_path="$log_dir/final/clf_predictor.pt"
-            accelerate launch generate_preds.py --peft_method lopa --task_name "cruxeval_${task}_prediction" --lp_rank "$lp_rank" --log_dir "$result_dir" --load_adapter_from "$load_adapter_from" --clf_predictor_path "$clf_predictor_path" --model_type "$model" --cruxeval_task "${task}_prediction"
+            accelerate launch generate_preds.py --peft_method lopa --task_name "cruxeval_${task}_prediction" --model_type "$model" --lp_rank "$lp_rank"  --load_adapter_from "$load_adapter_from" --clf_predictor_path "$clf_predictor_path" --log_dir "$result_dir"
 
             # For FFT [Uncomment]
 #            load_base_from_path="$log_dir/PromptTuningMultiModel/pretrained_model.pt"

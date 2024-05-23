@@ -1,5 +1,5 @@
 import torch
-
+from utils.custom import is_rank_0
 from utils.xformer import load_base_model, get_huggingface_path
 
 
@@ -54,17 +54,19 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 		)
 		self.args = args
 		self.config = config
-		self.base = base  # CodeBERT model
+		self.base = base
 		self.freeze_base = freeze_base
 		self.rank = self.args.lp_rank
 		
 		# # Base model does not require any training - freeze the weights
 		if self.freeze_base:
-			print("[INFO] Freezing the Enc base model weights")
+			if is_rank_0():
+				print("[INFO] Freezing the Enc base model weights")
 			for param in self.base.parameters():
 				param.requires_grad = False
 		else:
-			print("[INFO] Tuning the Enc base model weights")
+			if is_rank_0():
+				print("[INFO] Tuning the Enc base model weights")
 		
 		# For each virtual token, predict a word embedding - mu and logvar
 		self.n_virtual_tokens = n_virtual_tokens

@@ -81,7 +81,7 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_pt"}}
+				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}_pt"}}
 			)
 	
 	def count_parameters(self):

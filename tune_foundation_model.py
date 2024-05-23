@@ -1,11 +1,19 @@
 from accelerate.logging import MultiProcessAdapter
 
 from utils.config import get_config
+from utils.custom import is_rank_0
 
 
 def main():
 	args, logger = get_config()
 	logger = MultiProcessAdapter(logger, {})  # An adapter to assist with logging in multiprocess.
+	
+	# Print a big message for peft method
+	if is_rank_0():
+		print("\n\n")
+		print("#" * 100)
+		print(f"PEFT Method: {args.peft_method}")
+		print("#" * 100)
 	
 	if args.peft_method == 'lopa':
 		from trainers.lopa import Trainer

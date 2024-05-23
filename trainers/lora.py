@@ -84,7 +84,7 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_lora"}}
+				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}_lora"}}
 			)
 	
 	def count_parameters(self):
@@ -140,4 +140,4 @@ class Trainer(BaseTrainer):
 		)
 		
 		if is_rank_0():
-			print("Saved the Decoder model at:", os.path.join(save_at, "LoRA"))
+			print("Saved the Decoder model at:", os.path.join(save_at, "PEFT"))

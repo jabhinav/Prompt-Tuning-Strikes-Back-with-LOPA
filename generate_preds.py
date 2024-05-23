@@ -44,8 +44,11 @@ def load_encoder(args, logger, accelerator):
 	# Load the model state dict on the CPU to avoid an OOM error.
 	loaded_state_dict = torch.load(args.clf_predictor_path, map_location="cpu")
 	loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
-	loaded_state_dict = {k: v for k, v in loaded_state_dict.items() if 'base' not in k}  # Remove base model weights
-	model.load_state_dict(loaded_state_dict, strict=False if args.peft_method == 'idpg' else True)  # strict=False allows for partial loading [IDPG-specific]
+	if args.peft_method == 'idpg':
+		loaded_state_dict = {k: v for k, v in loaded_state_dict.items() if 'base' not in k}  # Remove base model weights
+		model.load_state_dict(loaded_state_dict, strict=False)  # strict=False allows for partial loading [IDPG-specific]
+	else:
+		model.load_state_dict(loaded_state_dict, strict=True)
 	
 	# release memory
 	del loaded_state_dict
@@ -117,7 +120,6 @@ def load_lora(args, logger, accelerator, model):
 		print(msg)
 		
 	return model
-
 
 
 def load_idpg(args, logger, accelerator, model):
