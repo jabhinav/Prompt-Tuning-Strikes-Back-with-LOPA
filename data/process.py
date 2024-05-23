@@ -3,7 +3,7 @@ import json
 from tqdm import tqdm
 
 from utils.xformer import load_tokenizer, get_huggingface_path
-from utils.data import MBPP_Dataset as CustomDataset
+from utils.data import MBPP_Dataset_wEnc as CustomDataset
 from typing import List
 
 
