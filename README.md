@@ -79,12 +79,12 @@ python tune_foundation_model.py --peft_method lopa --task_name mbpp --model_type
 For using accelerator. Here is an example command that uses deepspeed-stage2 with accelerate:
 
 ```sh
-accelerate launch --config_file config_ds_zero_stage2_no_fp16.yaml tune_foundation_model.py
+accelerate launch --config_file config_files/config_ds_zero_stage2_no_fp16.yaml tune_foundation_model.py
 ```
 
 Requirements: 
-- Setup `.yaml` configuration file for the experiment. Example: [config_ds_zero_stage2_no_fp16.yaml](config_ds_zero_stage2_no_fp16.yaml)
-- Provide path to deepspeed-stage2 configuration file in the `.yaml` file. Example: [ds_zero_stage2_no_fp16_config.json](ds_zero_stage2_no_fp16_config.json) 
+- Setup `.yaml` configuration file for the experiment. Example: [config_ds_zero_stage2_no_fp16.yaml](config_files/config_ds_zero_stage2_no_fp16.yaml)
+- Provide path to deepspeed-stage2 configuration file in the `.yaml` file. Example: [zero_stage2_nofp16_config.json](config_files/zero_stage2_nofp16_config.json)
 
 Use the following link for more details: [Huggingface Accelerator](https://huggingface.co/docs/accelerate/en/basic_tutorials/install)
 
@@ -95,11 +95,11 @@ Use the following link for more details: [Huggingface Accelerator](https://huggi
 Recommendation: Use Deepspeed-stage3 for FFT training to tune large models.
 
 ```sh
-deepspeed tune_fft_baseline.py --path_to_ds_config ./zero_stage3_config.json --fp16 True --gradient_accumulation_steps 2
+deepspeed tune_fft_baseline.py --path_to_ds_config config_files/zero_stage3_config.json --fp16 True --gradient_accumulation_steps 2
 ```
 
 Requirements:
-- Setup deepspeed configuration file for the experiment. Example: [zero_stage3_config.json](zero_stage3_config.json)
+- Setup deepspeed configuration file for the experiment. Example: [zero_stage3_config.json](config_files/zero_stage3_config.json)
 
 ---
 
