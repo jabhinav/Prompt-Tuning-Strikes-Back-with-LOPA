@@ -3,13 +3,11 @@ import os
 import torch
 import transformers
 from accelerate.logging import MultiProcessAdapter
-from transformers.modeling_utils import unwrap_model
 
 import logging
 from utils.CustomTensorboardCallback import CustomTensorBoardCallback
 from utils.config import get_config
 from utils.custom import is_rank_0, log_dist
-# from utils.data import MBPP_Dataset as CustomDataset
 from utils.data import MBPP_Dataset_wEnc, CruxEval_Dataset_wEnc
 from utils.model import load_base_model
 from utils.xformer import load_tokenizer, get_huggingface_path
@@ -18,15 +16,16 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def learn(args, logger):
-	# if is_rank_0():
-	# 	print(f"\n\nStarting training!! (Using train data split {args.finer_train_split}, First Half: {args.use_train_first_half})\n\n")
 	
-	# Get the tokenizer
+	if is_rank_0():
+		print("\n\nStarting training!!\n\n")
+	
+	# # Load Tokenizers ########################################################
 	tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
 	enc_tokenizer = load_tokenizer(args.enc_model_type, get_huggingface_path(args.enc_model_type))  # Dummy
 	
-	# Get the dataset
-	if args.dataset_name == 'mbpp':
+	# # Load the dataset ########################################################
+	if args.task_name == 'mbpp':
 		dataset = MBPP_Dataset_wEnc(
 			path_to_data=args.path_to_data,
 			tokenizer=tokenizer,
@@ -35,32 +34,21 @@ def learn(args, logger):
 			mode='train',
 			enc_tokenizer=enc_tokenizer,
 		)
-	elif args.dataset_name == 'cruxeval':
+	elif 'cruxeval' in args.task_name:
+		# Extract the type of cruxeval task
+		assert args.task_name.startswith('cruxeval_')
+		cruxeval_task = args.task_name[len('cruxeval_'):]
 		dataset = CruxEval_Dataset_wEnc(
 			tokenizer=tokenizer,
 			max_length=args.max_length,
 			mode='train',
 			enc_tokenizer=enc_tokenizer,
-			cruxeval_task=args.cruxeval_task,
+			cruxeval_task=cruxeval_task,
 			prefix=args.prefix,
 			cot=args.cot,
 		)
 	else:
-		raise ValueError(f"Invalid dataset name: {args.dataset_name}")
-	
-	# dataset = CustomDataset(
-	# 	path_to_data=args.path_to_data,
-	# 	tokenizer=tokenizer,
-	# 	max_prompt_length=args.max_prompt_length,
-	# 	max_length=args.max_length,
-	# 	sample_problems=args.num_train_problems,
-	# 	mode='train',
-	#
-	# 	# Uncomment to use a finer split of the training data to tune the baseline
-	# 	finer_split=args.finer_train_split,
-	# 	use_first_half=args.use_train_first_half
-	# )
-	# dataset.return_dict = True
+		raise ValueError(f"Invalid task name: {args.task_name}")
 	
 	# # Model Loading ########################################################
 	_, model = load_base_model(
@@ -169,7 +157,7 @@ if __name__ == "__main__":
 	For complete guide:
 	https://huggingface.co/docs/transformers/deepspeed
 	FFT large models is expensive
-	On anton (16GBx4):
+	On anton P100 (16GBx4):
 	$ deepspeed tune_fft_baseline.py # with stage 2 works fine but without fp16. Even with stage 2 1.3b goes OOM
 	On A100 (40GBx2):
 	$ deepspeed tune_fft_baseline.py --path_to_ds_config ./zero_stage3_config.json --fp16 True --gradient_accumulation_steps 2

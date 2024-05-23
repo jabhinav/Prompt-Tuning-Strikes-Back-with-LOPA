@@ -1,13 +1,11 @@
 import os
 
 import torch
-from accelerate.logging import MultiProcessAdapter
 
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftIDPGModel
-from utils.config import get_config
+from trainers.base import BaseTrainer
 from utils.custom import is_rank_0
 from utils.model import IDPGSoftPromptGenerator as EmbeddingEncoder, IDPG
-from utils.trainer import BaseTrainer
 from utils.xformer import load_base_model
 
 
@@ -177,19 +175,3 @@ class Trainer(BaseTrainer):
 		if is_rank_0():
 			print("Saved the Decoder model at:", os.path.join(save_at, "PEFT"))
 			print("Saved the Encoder model at:", os.path.join(save_at, "clf_predictor.pt"))
-
-
-def main():
-	args, logger = get_config()
-	logger = MultiProcessAdapter(logger, {})  # An adapter to assist with logging in multiprocess.
-	
-	# To force the encoder to be same as the decoder
-	# args.enc_model_type = args.model_type
-	
-	trainer = Trainer(args, logger)
-	trainer.train_loop()
-
-
-if __name__ == '__main__':
-	# To run with accelerate, $ accelerate launch --config_file config_ds_zero_stage2_no_fp16.yaml tune_idpg_baseline.py
-	main()

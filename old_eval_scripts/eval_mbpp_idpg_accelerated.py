@@ -12,7 +12,7 @@ from accelerate.logging import MultiProcessAdapter
 
 from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftIDPGModel
 from utils.config import get_config
-from utils.eval import save_predictions_mbxp_format, decode_predictions
+from utils.eval import save_predictions_mbxp_format, decode_mbpp_predictions
 from torch.utils.data.dataloader import DataLoader
 from utils.data import MBPP_Dataset_wEnc as CustomDataset
 from utils.model import IDPGSoftPromptGenerator as EmbeddingEncoder
@@ -208,7 +208,7 @@ def evaluate(args, logger):
 		for sample, generated_tokens in zip(generated_tasks, generated_tokens):
 			gen_token_dict[sample].append(generated_tokens)
 	
-	code_gens: List[List[Optional[str]]] = decode_predictions(args, gen_token_dict, dec_tokenizer, dataset)
+	code_gens, code_gens_raw = decode_mbpp_predictions(args, gen_token_dict, dec_tokenizer, dataset)
 	
 	if accelerator.is_main_process:
 		# Map back the task ids to the original ids

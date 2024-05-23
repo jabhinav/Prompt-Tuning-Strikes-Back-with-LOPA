@@ -1,13 +1,10 @@
 import os
 
 import torch
-from accelerate.logging import MultiProcessAdapter
 
-from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftCvaeModel
-from utils.config import get_config
+from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftModel
+from trainers.base import BaseTrainer
 from utils.custom import is_rank_0
-from utils.model import LatentPromptAttentionGenerator as EmbeddingEncoder, CVAE
-from utils.trainer import BaseTrainer
 from utils.xformer import load_base_model
 
 
@@ -15,34 +12,6 @@ class Trainer(BaseTrainer):
 	
 	def __init__(self, args, logger):
 		super(Trainer, self).__init__(args, logger)
-	
-	def init_encoder(self):
-		"""
-		Initialize the encoder.
-		"""
-		args = self.args
-		model = EmbeddingEncoder(
-			args=self.args,
-			n_virtual_tokens=self.args.total_virtual_tokens,
-			word_embedding_dim=self.args.word_embedding_dim
-		)
-		
-		if args.clf_predictor_path is not None:
-			# Load the model state dict on the CPU to avoid an OOM error.
-			loaded_state_dict = torch.load(args.clf_predictor_path, map_location="cpu")
-			loaded_state_dict = {k.replace('module.', ''): v for k, v in loaded_state_dict.items()}
-			model.load_state_dict(loaded_state_dict, strict=True)
-			
-			# release memory
-			del loaded_state_dict
-			
-			# Log the loaded checkpoint
-			msg = "Loaded encoder checkpoint from path: {}".format(args.clf_predictor_path)
-			if is_rank_0():
-				print(msg)
-		
-		self.logger.info("Initialized the encoder.")
-		return model
 	
 	def init_decoder(self):
 		"""
@@ -76,36 +45,34 @@ class Trainer(BaseTrainer):
 				print(msg)
 		
 		# Get the config
-		peft_config = PromptTuningConfig(
-			task_type=TaskType.CVAE_CAUSAL_LM,
+		pt_config = PromptTuningConfig(
+			task_type=TaskType.CAUSAL_LM,
 			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
 			num_virtual_tokens=args.num_virtual_tokens,
 		)
 		
 		if args.load_adapter_from is not None:
 			# Load the model adapters - in place
-			model = PeftCvaeModel.from_pretrained(
+			model = PeftModel.from_pretrained(
 				model=model,
 				model_id=args.load_adapter_from,  # Must be a directory containing the model files
-				config=peft_config,
+				config=pt_config,
 			)
 			msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
 			if is_rank_0():
 				print(msg)
 		else:
 			# Initialize the model adapters
-			model = get_peft_model(model, peft_config)
+			model = get_peft_model(model, pt_config)
 		
 		# This should match dimensions of torch.nn.Embedding(total_virtual_tokens, config.token_dim)
-		self.args.total_virtual_tokens = self.args.num_virtual_tokens * peft_config.num_transformer_submodules
-		self.args.word_embedding_dim = peft_config.token_dim
-		self.logger.info("Initialized the decoder.")
+		self.args.total_virtual_tokens = self.args.num_virtual_tokens * pt_config.num_transformer_submodules
+		self.args.word_embedding_dim = pt_config.token_dim
+		
 		return model
 	
 	def _build_model(self):
-		dec = self.init_decoder()  # Init first
-		enc = self.init_encoder()
-		model = CVAE(enc, dec)
+		model = self.init_decoder()
 		return model
 	
 	def init_trackers(self):
@@ -114,14 +81,12 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_cvae"}}
+				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_pt"}}
 			)
 	
 	def count_parameters(self):
-		enc_trainable_params = sum(p.numel() for p in self.model.enc.parameters() if p.requires_grad)
-		enc_all_params = sum(p.numel() for p in self.model.enc.parameters())
-		dec_trainable_params, dec_all_params = self.model.dec.get_nb_trainable_parameters()
-		return enc_trainable_params, enc_all_params, dec_trainable_params, dec_all_params
+		dec_trainable_params, dec_all_params = self.model.get_nb_trainable_parameters()
+		return None, None, dec_trainable_params, dec_all_params
 	
 	def _train_step(self, batch):
 		r"""Forward step for training and inference. This function is called
@@ -129,7 +94,12 @@ class Trainer(BaseTrainer):
 		"""
 		
 		with self.accelerator.accumulate(self.model):
-			output = self.model(batch)
+			output = self.model(
+				input_ids=batch["input_ids"],
+				attention_mask=batch["attention_mask"],
+				labels=batch["labels"],
+				output_hidden_states=True
+			)
 			
 			# Loss function = -log(p(x|z))
 			reconstruction_loss = output.loss
@@ -150,7 +120,6 @@ class Trainer(BaseTrainer):
 		return {
 			f"total_loss": total_loss.detach().cpu().numpy().item(),
 			f"reconstruction_loss": reconstruction_loss.detach().cpu().numpy().item(),
-			# f"kl_div": kl_div.detach().cpu().numpy().item(),
 		}
 	
 	def save(self, dir_tag: str):
@@ -160,30 +129,12 @@ class Trainer(BaseTrainer):
 		if not os.path.exists(save_at):
 			os.makedirs(save_at)
 		
-		model = self.accelerator.unwrap_model(self.model)
-		
-		# Save Encoder
-		torch.save(model.enc.state_dict(), os.path.join(save_at, "clf_predictor.pt"))
-		
 		# Save Decoder
-		model.dec.save_pretrained(
+		model = self.accelerator.unwrap_model(self.model)
+		model.save_pretrained(
 			save_directory=os.path.join(save_at, "PEFT"),
 			is_main_process=is_rank_0(),
-		)  # In place of $ accelerator.save(model.state_dict(), path)
+		)
 		
 		if is_rank_0():
 			print("Saved the Decoder model at:", os.path.join(save_at, "PEFT"))
-			print("Saved the Encoder model at:", os.path.join(save_at, "clf_predictor.pt"))
-
-
-def main():
-	args, logger = get_config()
-	logger = MultiProcessAdapter(logger, {})  # An adapter to assist with logging in multiprocess.
-	
-	trainer = Trainer(args, logger)
-	trainer.train_loop()
-
-
-if __name__ == '__main__':
-	# To run with accelerate, $ accelerate launch --config_file config_ds_zero_stage2_no_fp16.yaml train_cvae.py --load_base_from_path ./logging/codegen-350m/Baseline_1.0/output/pytorch_model.bin --do_peft 1
-	main()

@@ -153,7 +153,7 @@ def post_process(args, db=False):
 			for item in experimental_data:
 				f.write(json.dumps(item) + '\n')
 				
-		new_path = args.path.replace('mbxp_solutions.json', 'mbxp_solutions_post_processed_combined.json')
+		new_path = args.path.replace('mbxp_solutions.json', 'mbxp_solutions_post_processed.json')
 		with open(new_path, 'w') as f:
 			# Dump both the original and the experimental data
 			for item1, item2 in zip(data, experimental_data):
@@ -184,7 +184,7 @@ def post_process_stop_at_stop_token():
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
-	parser.add_argument('--path', type=str, default='./logging/results/mbxp_solutions.json')
+	parser.add_argument('--path', type=str, default=None)
 	_args = parser.parse_args()
 	post_process(_args)
 	# post_process_stop_at_stop_token()

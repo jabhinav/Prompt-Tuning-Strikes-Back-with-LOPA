@@ -9,16 +9,18 @@ import transformers
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.logging import MultiProcessAdapter
+from transformers.modeling_utils import load_sharded_checkpoint
 
-from peft import PeftModel
+from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftModel
 from utils.config import get_config
-from utils.eval import save_predictions_mbxp_format, decode_predictions
+from utils.eval import save_predictions_mbxp_format, decode_mbpp_predictions
 from torch.utils.data.dataloader import DataLoader
 from utils.data import MBPP_Dataset_wEnc as CustomDataset
 from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
 
 
 def load_model(args, logger, accelerator):
+	
 	# Get the model
 	_, model = load_base_model(
 		model_type=args.model_type,
@@ -26,6 +28,15 @@ def load_model(args, logger, accelerator):
 		model_path=args.model_name_or_path,
 		load_in_8bit=args.load_in_8bit
 	)
+	
+	# Larger models are sharded
+	if args.sharded_checkpoint_dir is not None:
+		# Ref: https://huggingface.co/docs/transformers/big_models
+		load_sharded_checkpoint(model, args.sharded_checkpoint_dir)
+		msg = "[INFO] Loaded the sharded checkpoint from: {}".format(args.sharded_checkpoint_dir)
+		logger.info(msg)
+		if accelerator.is_local_main_process:
+			print(msg)
 	
 	# Load checkpoint
 	if args.load_base_from_path is not None:
@@ -43,66 +54,61 @@ def load_model(args, logger, accelerator):
 		if accelerator.is_local_main_process:
 			print(message)
 	
-	if not os.path.exists(args.load_adapter_from):
-		logger.error("Please specify the correct path to load the model adapters from")
-		raise ValueError("Please specify the correct path to load the model adapters from")
+	if args.load_adapter_from is not None:
+		# Get the config
+		peft_config = PromptTuningConfig(
+			task_type=TaskType.CAUSAL_LM,
+			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
+			num_virtual_tokens=args.num_virtual_tokens,
+		)
+		
+		# Load the model adapters - in place
+		model = PeftModel.from_pretrained(
+			model=model,
+			model_id=args.load_adapter_from,  # Must be a directory containing the model files
+			config=peft_config,
+		)
+		msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
+		logger.info(msg)
+		if accelerator.is_local_main_process:
+			print(msg)
 	
-	# # Load the model adapters - in place
-	model = PeftModel.from_pretrained(
-		model=model,
-		model_id=args.load_adapter_from,  # Must be a directory containing the model files
-	)
-	
-	# # Link: https://huggingface.co/docs/peft/en/developer_guides/lora
-	
-	# merge the adapter weights with the base model. doesn’t keep the adapter weights in memory.
-	model.merge_and_unload()
-	
-	# you need to keep a copy of the weights so you can unmerge the adapter later or delete and load different ones
-	# model.merge_adapter()
-	
-	# unmerge the LoRA layers from the base model
-	# model.unmerge_adapter()
-	
-	msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
-	logger.info(msg)
-	if accelerator.is_local_main_process:
-		print(msg)
-
 	return model
 
 
 @torch.no_grad()
 def evaluate(args, logger):
+	
 	transformers.logging.set_verbosity_error()
 	accelerator = Accelerator()
 	
 	# Get the tokenizer
-	dec_tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
+	tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
 	enc_tokenizer = load_tokenizer(args.enc_model_type, get_huggingface_path(args.enc_model_type))  # Dummy
 	
 	# Get the dataset
 	dataset = CustomDataset(
-		path_to_data=args.path_to_data,
-		tokenizer=dec_tokenizer,
-		max_prompt_length=args.max_prompt_length,
-		max_length=args.max_length,
-		mode='test',
-		enc_tokenizer=enc_tokenizer,
-		
-		# # Uncomment to use a finer split of the training data to evaluate
-		# finer_split=0.50,
-		# use_first_half=False
-	)
+			path_to_data=args.path_to_data,
+			tokenizer=tokenizer,
+			max_prompt_length=args.max_prompt_length,
+			max_length=args.max_length,
+			mode='test',
+			enc_tokenizer=enc_tokenizer,
+			
+			# # Uncomment to use a finer split of the training data to evaluate
+			# finer_split=0.50,
+			# use_first_half=False
+		)
+	
 	# # Leave this as is to only read prompt for any type of data
 	ds_loader = DataLoader(dataset, batch_size=1)
 	
-	# Get the decoder
+	# Get the model
 	model = load_model(args, logger, accelerator)
 	model.eval()
 	
 	if args.load_in_8bit:
-		# decoder.to() is not supported for 8bit and 4bit models
+		# model.to() is not supported for 8bit and 4bit models
 		model, ds_loader = accelerator.prepare(model, ds_loader)
 	else:
 		# we only wrap data loader to avoid extra memory occupation
@@ -124,7 +130,7 @@ def evaluate(args, logger):
 	}
 	
 	gen_token_dict = defaultdict(list)  # dict of list of generated tokens
-	
+
 	for step, batch in tqdm(
 			enumerate(ds_loader),
 			total=math.ceil(len(dataset) / accelerator.num_processes),
@@ -154,7 +160,7 @@ def evaluate(args, logger):
 		# each task is generated batch_size times
 		generated_tasks = batch["task_id"].repeat(args.num_return_sequences)
 		generated_tokens = accelerator.pad_across_processes(
-			generated_tokens, dim=1, pad_index=dec_tokenizer.pad_token_id
+			generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
 		)
 		generated_tokens, generated_tasks = accelerator.gather(
 			(generated_tokens, generated_tasks)
@@ -165,7 +171,7 @@ def evaluate(args, logger):
 		for sample, generated_tokens in zip(generated_tasks, generated_tokens):
 			gen_token_dict[sample].append(generated_tokens)
 	
-	code_gens: List[List[Optional[str]]] = decode_predictions(args, gen_token_dict, dec_tokenizer, dataset)
+	code_gens, code_gens_raw = decode_mbpp_predictions(args, gen_token_dict, tokenizer, dataset)
 	
 	if accelerator.is_main_process:
 		# Map back the task ids to the original ids
@@ -181,6 +187,11 @@ def evaluate(args, logger):
 def main():
 	args, logger = get_config()
 	logger = MultiProcessAdapter(logger, {})  # An adapter to assist with logging in multiprocess.
+	
+	# # Debug
+	# args.do_peft = 1
+	# args.load_base_from_path = './logging/Baseline_0.50/output/pytorch_model.bin'
+	# args.load_adapter_from = './logging/PEFT_Oracle_0.50_0.50_20ep/PromptTuningMultiModel'
 	
 	evaluate(args, logger)
 

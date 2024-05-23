@@ -8,90 +8,75 @@ from datetime import datetime
 from utils.custom import create_dir, is_rank_0, set_dist, set_seed, log_dist
 from utils.xformer import get_huggingface_path
 
-# Login to the Hugging Face Hub
 from huggingface_hub import login
-login(token='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')
 
 
 def get_config():
 	
-	# Define the parameters [If not provided, following are the default values]
-	model_type = "codegen-350M"  # codegen-350M, codegen2-3_7B, phi-2, phi-3, deepseek-coder-1.3b-base, deepseek-coder-7b-base, Meta-Llama-3-8B
-	dataset_name = "mbpp"
-	
 	parser = argparse.ArgumentParser()
 	
 	# #################################################### High-level ############################################### #
-	parser.add_argument("--dataset_name", type=str, default=dataset_name,
-						choices=['mbpp', 'cruxeval'])
-	parser.add_argument("--cruxeval_task", type=str, default=None,
-						choices=['input_prediction', 'output_prediction'])
-	parser.add_argument('--wandb_logging', type=bool, default=True)
-	parser.add_argument('--project_name', type=str, default='PromptTuningModel')
-	parser.add_argument('--do_peft', type=int, default=None)
+	parser.add_argument("--peft_method", type=str, default='lopa',
+						choices=['lopa', 'pt', 'idpg', 'lora'])
+	parser.add_argument("--task_name", type=str, default='cruxeval_input_prediction',
+						choices=['mbpp', 'cruxeval_input_prediction', 'cruxeval_output_prediction'])
+	parser.add_argument('--wandb_logging', type=bool, default=False)
+	parser.add_argument('--project_name', type=str, default='PromptTuningModel', help="Name of the wandb project")
 	parser.add_argument('--seed', type=int, default=9876, help="random seed for init.")
 	
+	# #################################################### Model #################################################### #
+	parser.add_argument("--model_type", type=str, default='codegen-350M',
+						choices=["phi-2", "phi-3", "codegen-350M", "codegen2-3_7B", "deepseek-coder-1.3b-base",
+								 "deepseek-coder-7b-base", "Meta-Llama-3-8B"])
+	parser.add_argument("--enc_model_type", type=str, default="codesage-small",
+						choices=["codebert-base", "codet5p-110m-embedding",
+								 "codesage-small", "codesage-base", "codesage-large"])
+	
 	# #################################################### Paths #################################################### #
-	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')
+	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')  # Used by MBPP
 	parser.add_argument('--load_adapter_from', type=str, default=None)  # Path to dir
 	parser.add_argument('--load_base_from_path', type=str, default=None)
 	parser.add_argument('--sharded_checkpoint_dir', type=str, default=None)
 	parser.add_argument('--clf_predictor_path', type=str, default=None)
 	parser.add_argument('--log_dir', type=str, default=None)
 	
-	# ############################################ Data Parameters ################################################## #
-	parser.add_argument('--max_prompt_length', type=int, default=325)  # Max 325
-	parser.add_argument('--max_length', type=int, default=325+256)  # Max 325+256
-	parser.add_argument("--max_new_tokens", type=int, default=256)
-	
 	# #################################### Prompt Tuning Parameters ################################################# #
-	parser.add_argument('--num_libraries', type=int, default=5)
 	parser.add_argument('--num_virtual_tokens', type=int, default=10)
-	
-	# #################################################### Model #################################################### #
-	parser.add_argument("--model_type", type=str, default=model_type,
-						choices=["phi-2", "phi-3", "codegen-350M", "codegen2-3_7B", "deepseek-coder-1.3b-base",
-								 "deepseek-coder-7b-base", "Meta-Llama-3-8B"])
-	parser.add_argument("--enc_model_type", type=str, default="codesage-small",
-						choices=["codebert-base", "codet5p-110m-embedding",
-								 "codesage-small", "codesage-base", "codesage-large"])
-	parser.add_argument("--lp_rank", type=int, default=1, help="Rank of the decoded row/col vectors.",
+	parser.add_argument("--lp_rank", type=int, default=1, help="Low-Rank for matrix factorization in LOPA",
 						choices=[1, 2, 4])
-	
+
 	# ################################################### Training ################################################## #
-	parser.add_argument("--num_epochs", type=int, default=5)  # 4 for fft on crux-eval, 10 for fft on mbpp
-	parser.add_argument("--per_gpu_train_batch_size", type=int, default=4)
+	parser.add_argument("--num_epochs", type=int, default=10)  # 4 for fft on crux-eval, 10 for fft on mbpp
+	parser.add_argument("--per_gpu_train_batch_size", type=int, default=2)
 	parser.add_argument("--lr", type=float, default=1e-3,
 						help="1e-3 for PT/IDPG/Ours, 1e-4 for LoRA(r=16, alpha=32), 1e-5 for FFT")
-	parser.add_argument("--ent_coeff", type=float, default=0.0)
 	parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
 	parser.add_argument("--num_warmup_steps", type=int, default=0)
-	parser.add_argument("--save_every", type=int, default=-1)
 	parser.add_argument("--weight_decay", type=float, default=0.05)  # Used only by FFT
 	parser.add_argument("--lr_scheduler_type", type=str, default='linear',
 						choices=['linear', 'cosine', 'cosine_with_restarts', 'polynomial', 'constant',
 								 'constant_with_warmup', 'inverse_sqrt', 'reduce_lr_on_plateau'])   # Used only by FFT
-	
+
 	# ################################################## Evaluation ################################################# #
 	parser.add_argument("--num_beams", type=int, default=1)
 	parser.add_argument("--do_sample", type=bool, default=True)
 	parser.add_argument("--num_return_sequences", type=int, default=1)
 	parser.add_argument("--num_return_sequences_per_iter", type=int, default=1)
-	parser.add_argument("--temperature", type=float, default=0.6, choices=[0.2, 0.6, 0.8])
+	parser.add_argument("--temperature", type=float, default=None, choices=[0.2, 0.6, 0.8])
 	parser.add_argument("--top_p", type=float, default=0.95)
 	parser.add_argument("--top_k", type=float, default=-1)
 	
-	# ################################################## Debugging ################################################## #
-	parser.add_argument('--db', default=False,
-						help='set to turn on debug mode i.e. using dummy small data split and only 1 data worker')
-	
 	# ########################################### Logging Configuration ############################################# #
+	parser.add_argument("--save_every", type=int, default=-1,
+						help="Save model every n epochs (if > 0)")
 	parser.add_argument("--save_steps", default=0, type=int,
 						help="Save model every n steps (If > 0) if `save_strategy==steps`")  # Used by FFT
 	parser.add_argument('--save_total_limit', default=1, type=int,
 						help='total of number checkpoints to keep; only keep the latest ones')  # Used by FFT
 	parser.add_argument("--log_interval", default=1, type=int,
 						help="Log every X updates steps.")  # Used by FFT
+	parser.add_argument("--huggingface_login_token", type=str, default='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',
+						help="Hugging Face login token")
 	
 	# ############################################ Hardware configuration ########################################### #
 	parser.add_argument("--local_rank", type=int, default=-1, help="For multi-node training: local_rank")
@@ -102,9 +87,10 @@ def get_config():
 	parser.add_argument("--load_in_8bit", type=bool, default=False,)
 	parser.add_argument("--no_cuda", help="Avoid using CUDA when available")
 	parser.add_argument("--node_index", type=int, default=-1, help="node index if multi-node running")
-	parser.add_argument("--gpu_per_node", type=int, default=2, help="num of gpus per node")
+	parser.add_argument("--gpu_per_node", type=int, default=4, help="num of gpus per node")
 	
 	# # #################################### EM-specific #################################### #
+	# parser.add_argument('--num_libraries', type=int, default=5)
 	# parser.add_argument("--num_init_epochs", type=int, default=5)
 	# parser.add_argument("--pre_num_iters", type=int, default=500)
 	# parser.add_argument("--max_m_steps", type=int, default=10)
@@ -123,6 +109,10 @@ def get_config():
 	
 	args = parser.parse_args()
 	
+	# Login to the Hugging Face Hub
+	if args.huggingface_login_token is not None:
+		login(token=args.huggingface_login_token)
+	
 	# Get huggingface paths for the models
 	args.model_name_or_path = get_huggingface_path(args.model_type)
 	args.config_name = get_huggingface_path(args.model_type)
@@ -134,7 +124,6 @@ def get_config():
 		log_dir = os.path.join('./logging', current_time)
 		args.log_dir = log_dir
 	create_dir(args.log_dir)
-
 	
 	# Configure logging
 	if is_rank_0():
@@ -146,20 +135,15 @@ def get_config():
 	# Set save paths
 	args.save_at = os.path.join(args.log_dir, 'PromptTuningMultiModel')
 	args.save_results_at = os.path.join(args.log_dir, 'all_codes.json')
-	# [If number of tokens in fwd pass are kept to be max_length] :-
-	# Update the max_length and max_prompt_length by deducting the number of virtual tokens.
-	args.max_length = args.max_length - args.num_virtual_tokens
-	args.max_prompt_length = args.max_prompt_length - args.num_virtual_tokens
 	
 	# Set the distributed training
 	set_dist(args)
+	
 	# Set the seed
 	set_seed(args)
-	# # Update the args with custom attributes - used when specific partitions are needed for a particular dataset
-	# update_args_with_custom_attributes(args)
-	# Add crux-eval specific args
-	if args.dataset_name == 'cruxeval':
-		add_cruxeval_args(args)
+	
+	# # Update the args with task-specific custom attributes
+	add_task_attributes(args)
 	
 	# Log the config
 	config: dict = vars(args)
@@ -170,30 +154,40 @@ def get_config():
 	log_dist(message=json.dumps(config, indent=4), level=logging.INFO, ranks=[0])
 	
 	return args, logger
-
-
-def update_args_with_custom_attributes(args):
-	# [[[HERE]]] For using training data split-2
-	args.finer_train_split = 1.0
-	args.use_train_first_half = True
-
-	# [[[HERE]]] Only used by prior
-	args.path_to_train_prior_labels = './logging/train_gt_instance.json'
 	
 
-def add_cruxeval_args(args):
+def add_task_attributes(args):
+	"""
+	Following values were used to compute the results. Overwrite them if required.
+	:param args:
+	:return:
+	"""
 	
-	# Update the max length [used by cruxeval -> 1024]
-	# Note: this will override the deduction of num_virtual_tokens from max_length. So, virtual tokens will be appended
-	# Useful when doing ablation on number of virtual tokens
-	args.max_length = 512  # I have chosen this based on the max length of the prompt and the code generation.
-	
-	# Prefix to add to the prompt. For example InCoder needs prefix='<| file ext=.py |>\n'
-	args.prefix = ""
-	
-	# Use chain-of-thoughts for the prompt: Choose from False, True [both used by cruxeval]
-	args.cot = False
-	
-	# Temperature for generation: Choose from 0.2, 0.8 [both used by cruxeval]
-	args.temperature = 0.2
-	
+	if 'cruxeval' in args.task_name:
+		# Update the max length [used by cruxeval -> 1024]
+		# Note: this will override the deduction of num_virtual_tokens from max_length. So, virtual tokens will be appended
+		# Useful when doing ablation on number of virtual tokens
+		args.max_length = 512  # I have chosen this based on the max length of the prompt and the code generation.
+		
+		# Prefix to add to the prompt. For example InCoder needs prefix='<| file ext=.py |>\n'
+		args.prefix = ""
+		
+		# Use chain-of-thoughts for the prompt? [Not supported for now]
+		args.cot = False
+		
+		# Temperature for generation: Choose from 0.2, 0.8 [both used by cruxeval]
+		args.temperature = 0.2
+		
+	elif args.task_name == 'mbpp':
+		
+		args.max_prompt_length = 325
+		args.max_new_tokens = 256
+		args.max_length = args.max_prompt_length + args.max_new_tokens
+		
+		# [If number of tokens in fwd pass (including virtual tokens) are kept to be = max_length] :-
+		# Update the max_length and max_prompt_length by deducting the number of virtual tokens.
+		args.max_length = args.max_length - args.num_virtual_tokens
+		args.max_prompt_length = args.max_prompt_length - args.num_virtual_tokens
+		
+		# Temperature for generation:
+		args.temperature = 0.6

@@ -3,8 +3,6 @@ import os
 import logging
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
-from utils.data import CruxEval_Dataset
-from utils.custom import is_rank_0
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +99,7 @@ def save_best_lib_predictions_mbxp_format(
 	logger.info(f"Saved best lib predictions in a single file in the format required by the MBXP evaluation script")
 	
 	
-def decode_predictions(args, gen_token_dict, tokenizer, dataset) -> List[List[Optional[str]]]:
+def decode_mbpp_predictions(args, gen_token_dict, tokenizer, dataset) -> Tuple[List[List[Optional[str]]], List[List[Optional[str]]]]:
 	
 	code_gens: List[List[Optional[str]]] = [[] for _ in range(len(dataset))]
 	
@@ -139,10 +137,10 @@ def decode_predictions(args, gen_token_dict, tokenizer, dataset) -> List[List[Op
 			code_gens[sample].append(gen_code)
 
 	
-	return code_gens
+	return code_gens, code_gens
 
 
-def decode_cruxeval_predictions(gen_token_dict, tokenizer, dataset: CruxEval_Dataset) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+def decode_cruxeval_predictions(gen_token_dict, tokenizer, dataset) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
 	code_gens = defaultdict(list)
 	code_gens_raw = defaultdict(list)
 	
@@ -178,3 +176,12 @@ def decode_cruxeval_predictions(gen_token_dict, tokenizer, dataset: CruxEval_Dat
 			code_gens[dataset.idx_to_id[_idx]].append(processed_text)
 	
 	return code_gens, code_gens_raw
+
+
+def decode_predictions(args, gen_token_dict, tokenizer, dataset):
+	if 'cruxeval' in args.task_name:
+		return decode_cruxeval_predictions(gen_token_dict, tokenizer, dataset)
+	elif args.task_name == 'mbpp':
+		return decode_mbpp_predictions(args, gen_token_dict, tokenizer, dataset)
+	else:
+		raise NotImplementedError(f"Decode Predictions for Task {args.task_name} not implemented yet")

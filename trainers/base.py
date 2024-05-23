@@ -44,7 +44,7 @@ class BaseTrainer(object):
 		self.curr_temp = 1.0
 		
 		# setup tokenizer
-		logger.info(f"Loading Dec tokenizer from {get_huggingface_path(args.model_type)}")
+		logger.info(f"Loading FM tokenizer from {get_huggingface_path(args.model_type)}")
 		self.tokenizer = load_tokenizer(args.model_type, args.tokenizer_name)
 		logger.info(f"Loading Enc tokenizer from {get_huggingface_path(args.enc_model_type)}")
 		self.enc_tokenizer = load_tokenizer(args.enc_model_type, get_huggingface_path(args.enc_model_type))
@@ -73,7 +73,7 @@ class BaseTrainer(object):
 					   f" trainable%: {100 * enc_trainable_params / enc_all_params}")
 				self.logger.info(msg)
 			if dec_trainable_params is not None:
-				msg = (f"Decoder: trainable params: {dec_trainable_params:,d} || all params: {dec_all_params:,d} ||"
+				msg = (f"Foundation Model: trainable params: {dec_trainable_params:,d} || all params: {dec_all_params:,d} ||"
 					   f" trainable%: {100 * dec_trainable_params / dec_all_params}")
 				self.logger.info(msg)
 		
@@ -134,7 +134,7 @@ class BaseTrainer(object):
 	def _build_dataloader(self):
 		# Get the dataset
 		with self.accelerator.main_process_first():
-			if self.args.dataset_name == 'mbpp':
+			if self.args.task_name == 'mbpp':
 				dataset = MBPP_Dataset_wEnc(
 					path_to_data=self.args.path_to_data,
 					tokenizer=self.tokenizer,
@@ -143,18 +143,21 @@ class BaseTrainer(object):
 					mode='train',
 					enc_tokenizer=self.enc_tokenizer,
 				)
-			elif self.args.dataset_name == 'cruxeval':
+			elif 'cruxeval' in self.args.task_name:
+				# Extract the type of cruxeval task
+				assert self.args.task_name.startswith('cruxeval_')
+				cruxeval_task = self.args.task_name[len('cruxeval_'):]
 				dataset = CruxEval_Dataset_wEnc(
 					tokenizer=self.tokenizer,
 					max_length=self.args.max_length,
 					mode='train',
 					enc_tokenizer=self.enc_tokenizer,
-					cruxeval_task=self.args.cruxeval_task,
+					cruxeval_task=cruxeval_task,
 					prefix=self.args.prefix,
 					cot=self.args.cot,
 				)
 			else:
-				raise ValueError(f"Invalid dataset name: {self.args.dataset_name}")
+				raise ValueError(f"Invalid task name: {self.args.task_name}")
 		
 		# Prepare training data loader
 		sampler = RandomSampler(dataset)

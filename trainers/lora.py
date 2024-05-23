@@ -1,13 +1,11 @@
 import os
 
 import torch
-from accelerate.logging import MultiProcessAdapter
+from peft import LoraConfig, get_peft_model, PeftModel
 
-from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftModel
-from utils.config import get_config
+from trainers.base import BaseTrainer
 from utils.custom import is_rank_0
-from utils.trainer import BaseTrainer
-from utils.xformer import load_base_model
+from utils.xformer import load_base_model, LORA_IA3_TARGET_MODULES
 
 
 class Trainer(BaseTrainer):
@@ -46,11 +44,18 @@ class Trainer(BaseTrainer):
 			if is_rank_0():
 				print(msg)
 		
+		# # Uncomment this to identify target modules for LoRA
+		# print(model.state_dict().keys())
+		# sys.exit(-1)
+		
 		# Get the config
-		pt_config = PromptTuningConfig(
-			task_type=TaskType.CAUSAL_LM,
-			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
-			num_virtual_tokens=args.num_virtual_tokens,
+		lora_config = LoraConfig(
+			r=16,
+			lora_alpha=32,
+			target_modules=LORA_IA3_TARGET_MODULES[args.model_type]["target_modules_lora"],
+			lora_dropout=0.1,
+			bias="none",
+			# modules_to_save=["classifier"],  # List of modules apart from adapter layers to be set as trainable and saved in the final checkpoint.
 		)
 		
 		if args.load_adapter_from is not None:
@@ -58,22 +63,18 @@ class Trainer(BaseTrainer):
 			model = PeftModel.from_pretrained(
 				model=model,
 				model_id=args.load_adapter_from,  # Must be a directory containing the model files
-				config=pt_config,
 			)
 			msg = "[INFO] Loaded the model adapters from: {}".format(args.load_adapter_from)
 			if is_rank_0():
 				print(msg)
 		else:
 			# Initialize the model adapters
-			model = get_peft_model(model, pt_config)
-		
-		# This should match dimensions of torch.nn.Embedding(total_virtual_tokens, config.token_dim)
-		self.args.total_virtual_tokens = self.args.num_virtual_tokens * pt_config.num_transformer_submodules
-		self.args.word_embedding_dim = pt_config.token_dim
+			model = get_peft_model(model, lora_config)
 		
 		return model
 	
 	def _build_model(self):
+		
 		model = self.init_decoder()
 		return model
 	
@@ -83,7 +84,7 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_pt"}}
+				init_kwargs={"wandb": {"name": f"{self.args.dataset_name}/{self.args.model_type}_lora"}}
 			)
 	
 	def count_parameters(self):
@@ -139,17 +140,4 @@ class Trainer(BaseTrainer):
 		)
 		
 		if is_rank_0():
-			print("Saved the Decoder model at:", os.path.join(save_at, "PEFT"))
-
-
-def main():
-	args, logger = get_config()
-	logger = MultiProcessAdapter(logger, {})  # An adapter to assist with logging in multiprocess.
-	
-	trainer = Trainer(args, logger)
-	trainer.train_loop()
-
-
-if __name__ == '__main__':
-	# To run with accelerate, $ accelerate launch --config_file ds_zero3_cpu_nofp16.yaml train_cvae.py --load_base_from_path ./logging/codegen-350m/Baseline_1.0/output/pytorch_model.bin --do_peft 1
-	main()
+			print("Saved the Decoder model at:", os.path.join(save_at, "LoRA"))
