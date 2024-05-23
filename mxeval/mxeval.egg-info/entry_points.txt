@@ -1,0 +1,2 @@
+[console_scripts]
+evaluate_functional_correctness = mxeval.evaluate_functional_correctness
