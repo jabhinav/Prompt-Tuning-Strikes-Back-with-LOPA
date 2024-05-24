@@ -44,7 +44,7 @@ def get_clf_embedding(args, model, prompt, prompt_mask, response, library_idx):
 
 
 class LatentPromptAttentionGenerator(torch.nn.Module):
-	def __init__(self, args, n_virtual_tokens, word_embedding_dim, use_bias=True, freeze_base=True):
+	def __init__(self, args, n_virtual_tokens, word_embedding_dim, use_bias=True, freeze_base=True, MLP_h=None):
 		super(LatentPromptAttentionGenerator, self).__init__()
 		
 		config, base = load_base_model(
@@ -77,15 +77,18 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 		hidden_dim = config.hidden_size if hasattr(config, 'hidden_size') else config.embed_dim if hasattr(config, 'embed_dim') else 768
 		self.config_initializer_range = config.initializer_range if hasattr(config, 'initializer_range') else 0.02
 		
+		if MLP_h is None:
+			MLP_h = hidden_dim
+		
 		# Define the head for encoding the row vectors - weighs virtual tokens
 		self.row_dropout = torch.nn.Dropout(dropout_prob)
-		self.row_dense = torch.nn.Linear(hidden_dim, hidden_dim)
-		self.row_out_proj = torch.nn.Linear(hidden_dim, n_virtual_tokens * self.rank, bias=use_bias)
+		self.row_dense = torch.nn.Linear(hidden_dim, MLP_h)
+		self.row_out_proj = torch.nn.Linear(MLP_h, n_virtual_tokens * self.rank, bias=use_bias)
 		
 		# Define the head for encoding the column vectors - weighs the word embedding dimensions
 		self.col_dropout = torch.nn.Dropout(dropout_prob)
-		self.col_dense = torch.nn.Linear(hidden_dim, hidden_dim)
-		self.col_out_proj = torch.nn.Linear(hidden_dim, word_embedding_dim * self.rank, bias=use_bias)
+		self.col_dense = torch.nn.Linear(hidden_dim, MLP_h)
+		self.col_out_proj = torch.nn.Linear(MLP_h, word_embedding_dim * self.rank, bias=use_bias)
 		
 		self.init_predictor_head()
 	
@@ -179,7 +182,7 @@ class LatentPromptAttentionGenerator(torch.nn.Module):
 
 
 class IDPGSoftPromptGenerator(torch.nn.Module):
-	def __init__(self, args, n_virtual_tokens, word_embedding_dim, use_bias=True):
+	def __init__(self, args, n_virtual_tokens, word_embedding_dim, use_bias=True, MLP_h=None):
 		super(IDPGSoftPromptGenerator, self).__init__()
 		
 		# In IDPG, the encoder is the same as the decoder
@@ -205,10 +208,13 @@ class IDPGSoftPromptGenerator(torch.nn.Module):
 		hidden_dim = config.hidden_size if hasattr(config, 'hidden_size') else config.embed_dim if hasattr(config, 'embed_dim') else 768
 		self.config_initializer_range = config.initializer_range if hasattr(config, 'initializer_range') else 0.02
 		
+		if MLP_h is None:
+			MLP_h = hidden_dim
+		
 		# Define the head for encoding all virtual tokens
 		self._dropout = torch.nn.Dropout(dropout_prob)
-		self.layer_down_project = torch.nn.Linear(hidden_dim, hidden_dim, bias=use_bias)
-		self.layer_up_project = torch.nn.Linear(hidden_dim, n_virtual_tokens * word_embedding_dim, bias=use_bias)
+		self.layer_down_project = torch.nn.Linear(hidden_dim, MLP_h, bias=use_bias)
+		self.layer_up_project = torch.nn.Linear(MLP_h, n_virtual_tokens * word_embedding_dim, bias=use_bias)
 		
 		self.init_predictor_head()
 	

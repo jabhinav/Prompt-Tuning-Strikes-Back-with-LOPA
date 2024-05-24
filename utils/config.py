@@ -75,7 +75,7 @@ def get_config():
 						help='total of number checkpoints to keep; only keep the latest ones')  # Used by FFT
 	parser.add_argument("--log_interval", default=1, type=int,
 						help="Log every X updates steps.")  # Used by FFT
-	parser.add_argument("--huggingface_login_token", type=str, default=None,
+	parser.add_argument("--huggingface_login_token", type=str, default='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',
 						help="Hugging Face login token")
 	
 	# ############################################ Hardware configuration ########################################### #
