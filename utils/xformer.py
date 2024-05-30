@@ -1,5 +1,5 @@
 import logging
-
+import torch
 import numpy as np
 from transformers import RobertaConfig, T5Config, BartConfig, GPT2Config, OpenAIGPTConfig, BertConfig, \
 	DistilBertConfig, GPTNeoConfig, AutoConfig
@@ -222,8 +222,11 @@ def load_base_model(model_type, config_name, model_path, load_in_8bit: bool = Fa
 		model_path,
 		trust_remote_code=True,
 		revision="main",
-		load_in_8bit=load_in_8bit,
-	    # torch_dtype="auto"
+		device_map="auto",
+		# # For loading model in bfloat16, set
+		# torch_dtype=torch.bfloat16,
+		# # For loading model in 8bit, set
+		# load_in_8bit=True,
 	)
 	
 	if is_rank_0():
