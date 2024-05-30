@@ -223,9 +223,9 @@ def load_base_model(model_type, config_name, model_path, load_in_8bit: bool = Fa
 		trust_remote_code=True,
 		revision="main",
 		device_map="auto",
-		# # For loading model in bfloat16, set
+		# # For loading model in bfloat16, set. This is not quantization so it will not be as slow.
 		# torch_dtype=torch.bfloat16,
-		# # For loading model in 8bit, set
+		# # For loading model in 8bit, set. This is quantization so it will be slower.
 		# load_in_8bit=True,
 	)
 	

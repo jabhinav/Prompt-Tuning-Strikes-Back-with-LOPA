@@ -177,3 +177,10 @@ We provide the sample results (pass@1) of running different PEFT methods `phi-2`
 ## Contributing
 
 We welcome contributions to the project. Please raise an issue or submit a pull request.
+
+---
+
+## References
+
+To run larger models, we recommend using the following resources:
+[Huggingface GPU Inference](https://huggingface.co/blog/hf-bitsandbytes-integration)
