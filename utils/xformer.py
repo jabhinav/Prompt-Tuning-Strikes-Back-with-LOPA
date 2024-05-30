@@ -33,6 +33,8 @@ MODEL_CLASSES = {
 	'phi-1_5': (AutoConfig, AutoModelForCausalLM),
 	'phi-2': (AutoConfig, AutoModelForCausalLM),
 	'phi-3': (AutoConfig, AutoModelForCausalLM),
+	'phi-3-small': (AutoConfig, AutoModelForCausalLM),
+	'phi-3-medium': (AutoConfig, AutoModelForCausalLM),
 	# ############################# Salesforce CodeT5 Models ############################# #
 	'codet5-small': (T5Config, T5ForConditionalGeneration),
 	'codet5-base': (T5Config, T5ForConditionalGeneration),
@@ -58,6 +60,7 @@ MODEL_CLASSES = {
 	'CodeLlama-13b-Python-hf': (AutoConfig, AutoModelForCausalLM),
 	'CodeLlama-34b-Python-hf': (AutoConfig, AutoModelForCausalLM),
 	'Meta-Llama-3-8B': (AutoConfig, AutoModelForCausalLM),
+	'Meta-Llama-3-70B': (AutoConfig, AutoModelForCausalLM),
 	# ############################# DeepSeek-Coder Models ############################# #
 	'deepseek-coder-1.3b-base': (AutoConfig, AutoModelForCausalLM),
 	'deepseek-coder-7b-base': (AutoConfig, AutoModelForCausalLM),
@@ -264,7 +267,11 @@ def get_huggingface_path(model: str) -> str:
 	elif model == 'phi-2':
 		huggingface_path = 'microsoft/phi-2'  # 2.7B + augmented with new data sources (NLP synthetic texts + websites)
 	elif model == 'phi-3':
-		huggingface_path = 'microsoft/Phi-3-mini-4k-instruct'  # 3.8B + larger and more advanced versions of the datasets used in phi-2.
+		huggingface_path = 'microsoft/Phi-3-mini-4k-instruct'  # 3.8B + larger and more advanced versions of the datasets used in phi-2. Also have 128k version
+	elif model == 'phi-3-small':
+		huggingface_path = 'microsoft/Phi-3-small-8k-instruct'  # 7B. Also have 128k version
+	elif model == 'phi-3-medium':
+		huggingface_path = 'microsoft/Phi-3-medium-4k-instruct'  # 14B. Also have 128k version
 	# ############################# Salesforce CodeT5 Models ############################# #
 	elif model == 'codet5-base':
 		huggingface_path = 'Salesforce/codet5-base'  # (220M)
@@ -309,7 +316,9 @@ def get_huggingface_path(model: str) -> str:
 	elif model == 'CodeLlama-34b-Python-hf':
 		huggingface_path = 'codellama/CodeLlama-34b-Python-hf'  # 70b is only provided when requested
 	elif model == 'Meta-Llama-3-8B':
-		huggingface_path = 'meta-llama/Meta-Llama-3-8B'
+		huggingface_path = 'meta-llama/Meta-Llama-3-8B'  # Also have `Meta-Llama-3-8B-instruct`
+	elif model == 'Meta-Llama-3-70B':
+		huggingface_path = 'meta-llama/Meta-Llama-3-70B'
 	# ############################# DeepSeek-Coder Models ############################# #
 	elif model == 'deepseek-coder-1.3b-base':
 		huggingface_path = 'deepseek-ai/deepseek-coder-1.3b-base'
