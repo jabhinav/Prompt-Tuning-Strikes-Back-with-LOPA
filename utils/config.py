@@ -19,21 +19,29 @@ def get_config():
 	parser.add_argument("--peft_method", type=str, default=None,
 						choices=['lopa', 'pt', 'idpg', 'lora'])
 	parser.add_argument("--task_name", type=str, default=None,
-						choices=['mbpp', 'cruxeval_input_prediction', 'cruxeval_output_prediction'])
-	parser.add_argument('--wandb_logging', type=bool, default=False)
-	parser.add_argument('--project_name', type=str, default='PromptTuningModel', help="Name of the wandb project")
+						choices=['mbpp', 'cruxeval_input_prediction', 'cruxeval_output_prediction',
+								 'nlg_e2e', 'nlg_webnlg', 'nlg_dart'])
+	parser.add_argument('--wandb_logging', action='store_true', help="Log to wandb")
+	parser.add_argument('--project_name', type=str, default='NLG', help="Name of the wandb project", choices=['PromptTuningModel', 'NLG'])
 	parser.add_argument('--seed', type=int, default=9876, help="random seed for init.")
 	
 	# #################################################### Model #################################################### #
 	parser.add_argument("--model_type", type=str, default=None,
 						choices=["phi-2", "phi-3", "codegen-350M", "codegen2-3_7B", "deepseek-coder-1.3b-base",
-								 "deepseek-coder-7b-base", "Meta-Llama-3-8B"])
-	parser.add_argument("--enc_model_type", type=str, default="codesage-small",
+								 "deepseek-coder-7b-base", "Meta-Llama-3-8B",
+								 "gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"])
+	parser.add_argument("--enc_model_type", type=str, default="roberta-large",
 						choices=["codebert-base", "codet5p-110m-embedding",
-								 "codesage-small", "codesage-base", "codesage-large"])
+								 "codesage-small", "codesage-base", "codesage-large",
+								 "roberta-base", "roberta-large"])
 	
 	# #################################################### Paths #################################################### #
-	parser.add_argument('--path_to_data', type=str, default='./data/MBPP/mbpp_release_v1.jsonl')  # Used by MBPP
+	# # # Paths
+	# MBPP, CruxEval: ./data/MBPP/mbpp_release_v1.jsonl -> We manually split this into train, valid, test. So no need for separate paths.
+	# E2E: ./NLG/data/e2e/train_formatted.jsonl
+	parser.add_argument('--path_to_data', type=str, default='./data/NLG/webnlg_challenge_2017/train_formatted.jsonl')
+	parser.add_argument('--path_to_eval_data', type=str, default='./data/NLG/webnlg_challenge_2017/dev_formatted.jsonl')
+	parser.add_argument('--path_to_test_data', type=str, default='./NLG/data/webnlg_challenge_2017/test_formatted.jsonl')
 	parser.add_argument('--load_adapter_from', type=str, default=None)  # Path to dir
 	parser.add_argument('--load_base_from_path', type=str, default=None)
 	parser.add_argument('--sharded_checkpoint_dir', type=str, default=None)
@@ -42,16 +50,22 @@ def get_config():
 	
 	# #################################### Prompt Tuning Parameters ################################################# #
 	parser.add_argument('--num_virtual_tokens', type=int, default=10)
-	parser.add_argument("--lp_rank", type=int, default=1, help="Low-Rank for matrix factorization in LOPA",
-						choices=[1, 2, 4])
+	parser.add_argument("--lp_rank", type=int, default=4, help="Low-Rank for matrix factorization in LOPA",
+						choices=[1, 2, 4, 8])
+	
+	# # ################################################ LORA params ################################################ #
+	parser.add_argument("--lora_dim", type=int, default=4)  # MBPP and CruX-Eval uses 16, e2e uses 4
+	parser.add_argument("--lora_alpha", type=int, default=32)
+	parser.add_argument("--lora_dropout", type=float, default=0.1)
 
 	# ################################################### Training ################################################## #
-	parser.add_argument("--num_epochs", type=int, default=10)  # 4 for fft on crux-eval, 10 for fft on mbpp
+	parser.add_argument("--num_epochs", type=int, default=5)  # 4 for fft on crux-eval, 10 for fft on mbpp
 	parser.add_argument("--per_gpu_train_batch_size", type=int, default=2)
+	parser.add_argument("--per_gpu_eval_batch_size", type=int, default=4)
 	parser.add_argument("--lr", type=float, default=1e-3,
-						help="1e-3 for PT/IDPG/Ours, 1e-4 for LoRA(r=16, alpha=32), 1e-5 for FFT")
+						help="1e-3 for PT/IDPG/Ours, 1e-4 for LoRA(r=16), 2e-4 for LoRA(r=4) + GPT2, 1e-5 for FFT")
 	parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-	parser.add_argument("--num_warmup_steps", type=int, default=0)
+	parser.add_argument("--num_warmup_steps", type=int, default=500)
 	parser.add_argument("--weight_decay", type=float, default=0.05)  # Used only by FFT
 	parser.add_argument("--lr_scheduler_type", type=str, default='linear',
 						choices=['linear', 'cosine', 'cosine_with_restarts', 'polynomial', 'constant',
@@ -191,3 +205,21 @@ def add_task_attributes(args):
 		
 		# Temperature for generation:
 		args.temperature = 0.6
+		
+	elif args.task_name in ['nlg_e2e', 'nlg_webnlg', 'nlg_dart']:
+		args.max_length = 256  # E2E Input (context+completion) Length Stats: Min: 25, Max: 125, Avg: 59.15453767123287
+		
+		# For generation
+		args.max_new_tokens = 64
+		args.num_beams = 5
+		args.do_sample = False
+		args.length_penalty = 0.8  # length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
+		args.no_repeat_ngram_size = 0  # If set to int > 0, all ngrams of that size can only occur once.
+		args.repetition_penalty = 1.0  # 1.0 means no penalty.
+		args.temperature = 1.0  # Default [Won't be used if do_sample=False]
+		
+		# # Debug for LOPA [overwrite]
+		# args.num_beams = 1
+		# args.do_sample = True
+		# args.temperature = 0.6
+		

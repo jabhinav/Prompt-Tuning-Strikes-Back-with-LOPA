@@ -877,7 +877,8 @@ class PeftCvaeModelForCausalLM(PeftCvaeModel):
 		
 		batch_size = _get_batch_size(input_ids, inputs_embeds)
 		if attention_mask is not None:
-			# concat prompt attention mask. Default: Attend to Virtual tokens of the prompt
+			
+			# # For prefix
 			prefix_attention_mask = torch.ones(batch_size, peft_config.num_virtual_tokens).to(attention_mask.device)
 			attention_mask = torch.cat((prefix_attention_mask, attention_mask), dim=1)
 		
@@ -922,6 +923,7 @@ class PeftCvaeModelForCausalLM(PeftCvaeModel):
 			# For no sharing
 			# prompts = latent_attention_weights
 			
+			# # For Prefix
 			inputs_embeds = torch.cat((prompts, inputs_embeds), dim=1)
 			
 			return self.base_model(inputs_embeds=inputs_embeds, **kwargs)
@@ -975,10 +977,13 @@ class PeftCvaeModelForCausalLM(PeftCvaeModel):
 			
 			if model_kwargs.get("attention_mask", None) is not None:
 				size = model_kwargs["input_ids"].shape[0], peft_config.num_virtual_tokens
+				
+				# # For Prefix
 				prefix_attention_mask = torch.ones(size).to(model_kwargs["input_ids"].device)
 				model_kwargs["attention_mask"] = torch.cat(
 					(prefix_attention_mask, model_kwargs["attention_mask"]), dim=1
 				)
+				
 			
 			if model_kwargs.get("position_ids", None) is not None:
 				warnings.warn("Position ids are not supported for parameter efficient tuning. Ignoring position ids.")
@@ -1001,19 +1006,22 @@ class PeftCvaeModelForCausalLM(PeftCvaeModel):
 			
 			else:
 				if model_kwargs["past_key_values"] is None:
+					batch_size = model_kwargs["input_ids"].shape[0]
 					inputs_embeds = self.word_embeddings(model_kwargs["input_ids"])
-					prompts = self.get_prompt(batch_size=model_kwargs["input_ids"].shape[0])
+					prompts = self.get_prompt(batch_size=batch_size)
 					prompts = prompts.to(inputs_embeds.dtype)
 
 					# Added functionality
-					if self.latent_attention_weights is not None:
-						# For shared prompt across instances
-						prompts = prompts * self.latent_attention_weights
-						
-						# For no-shared prompt
-						# prompts = self.latent_attention_weights
+					# For cases like beam-decoding, soft prompt encoded for a sample must be repeated for all beams
+					# latent_attention_weights = self.latent_attention_weights.repeat(batch_size, 1, 1)
+					# prompts = prompts * latent_attention_weights
 					
+					# For debugging
+					prompts = prompts * self.latent_attention_weights
+	
+					# # For Prefix
 					model_kwargs["inputs_embeds"] = torch.cat((prompts, inputs_embeds), dim=1)
+					
 					model_kwargs["input_ids"] = None
 		
 		# For transformers>=4.38.0 - for some architectures such as Llama, `cache_position` is

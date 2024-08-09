@@ -5,7 +5,7 @@ import torch
 from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftCvaeModel
 from trainers.base import BaseTrainer
 from utils.custom import is_rank_0
-from utils.model import LatentPromptAttentionGenerator as EmbeddingEncoder, CVAE
+from utils.model import LatentPromptAttentionGenerator as EmbeddingEncoder, LOPA
 from utils.xformer import load_base_model
 
 
@@ -103,7 +103,7 @@ class Trainer(BaseTrainer):
 	def _build_model(self):
 		dec = self.init_decoder()  # Init first
 		enc = self.init_encoder()
-		model = CVAE(enc, dec)
+		model = LOPA(enc, dec)
 		return model
 	
 	def init_trackers(self):
@@ -112,7 +112,7 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}_lopa"}}
+				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}/lopa"}}
 			)
 	
 	def count_parameters(self):
@@ -151,6 +151,12 @@ class Trainer(BaseTrainer):
 			# f"kl_div": kl_div.detach().cpu().numpy().item(),
 		}
 	
+	def _eval_step(self, batch):
+		with self.accelerator.accumulate(self.model):
+			output = self.model(batch)
+			reconstruction_loss = output.loss
+		return reconstruction_loss
+	
 	def save(self, dir_tag: str):
 		
 		# Create a directory to save the model
@@ -164,7 +170,8 @@ class Trainer(BaseTrainer):
 		torch.save(model.enc.state_dict(), os.path.join(save_at, "clf_predictor.pt"))
 		
 		# Save Decoder
-		model.dec.save_pretrained(
+		dec = self.accelerator.unwrap_model(self.model.dec)
+		dec.save_pretrained(
 			save_directory=os.path.join(save_at, "PEFT"),
 			is_main_process=is_rank_0(),
 		)  # In place of $ accelerator.save(model.state_dict(), path)

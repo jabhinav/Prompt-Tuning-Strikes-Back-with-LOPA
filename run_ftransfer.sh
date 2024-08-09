@@ -31,20 +31,20 @@ if [ "$server_type" == "paperspace" ]; then
 
 elif [ "$server_type" == "anton" ]; then
     # Anton commands
-    echo "Running Anton commands..."
+    echo "Sending files to Anton..."
 
     scp -r -i ~/.ssh/id_rsa ./*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/
     scp -r -i ~/.ssh/id_rsa ./*.sh abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/
     scp -r -i ~/.ssh/id_rsa ./utils/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/utils/
-    scp -r -i ~/.ssh/id_rsa ./utils/cruxeval_tasks/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/utils/cruxeval_tasks/
+#    scp -r -i ~/.ssh/id_rsa ./utils/cruxeval_tasks/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/utils/cruxeval_tasks/
     scp -r -i ~/.ssh/id_rsa ./trainers/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/trainers/
 
     # # Uncomment to update benchmarking scripts
-    scp -r -i ~/.ssh/id_rsa ./custom_benchmark/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/custom_benchmark/
+#    scp -r -i ~/.ssh/id_rsa ./custom_benchmark/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/custom_benchmark/
 
     # # Uncomment to update the peft scripts
-    scp -r -i ~/.ssh/id_rsa ./custom_peft/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/custom_peft/
-    scp -r -i ~/.ssh/id_rsa ./custom_peft/utils/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/custom_peft/utils/
+#    scp -r -i ~/.ssh/id_rsa ./custom_peft/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/custom_peft/
+#    scp -r -i ~/.ssh/id_rsa ./custom_peft/utils/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/custom_peft/utils/
 
     # # Uncomment to update
 #    scp -r -i ~/.ssh/id_rsa ./cruxeval/evaluation/*.py abhinav@anton.j"$ip_address".rice.edu:/home/abhinav/prog_synth/Liblearn/cruxeval/evaluation/

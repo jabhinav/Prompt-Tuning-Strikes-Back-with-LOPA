@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import List, Any
+from typing import List, Any, Dict, Tuple
 
 import torch
 from torch.utils.data import Dataset
@@ -469,10 +469,8 @@ class CruxEval_Dataset_wEnc(Dataset):
 			# ########################### Prepare for the base model ########################### #
 			
 			# Tokenize
-			prompt_ids = [self.tokenizer.bos_token_id] + self.tokenizer.encode(prompt, verbose=False,
-																			   add_special_tokens=False)
-			target_ids = self.tokenizer.encode(target, verbose=False, add_special_tokens=False) + [
-				self.tokenizer.eos_token_id]
+			prompt_ids = [self.tokenizer.bos_token_id] + self.tokenizer.encode(prompt, verbose=False, add_special_tokens=False)
+			target_ids = self.tokenizer.encode(target, verbose=False, add_special_tokens=False) + [self.tokenizer.eos_token_id]
 			
 			# Prepare input
 			if self.mode == 'train':
@@ -563,6 +561,242 @@ class CruxEval_Dataset_wEnc(Dataset):
 			else:
 				yield {
 					"task_id": self.row_idxs[i],
+					"input_ids": self.inputs[i],
+					"attention_mask": self.attn_masks[i],
+					"enc_input_ids": self.enc_inputs[i],
+					"enc_attention_mask": self.enc_masks[i],
+					"input_len": self.input_lens[i]
+				}
+
+
+class NLG_Dataset_wEnc(Dataset):
+	"""
+		For following Datasets:
+		"The E2E dataset: New challenges for end-to-end generation." arXiv preprint arXiv:1706.09254 (2017).
+		"The WebNLG challenge: Generating text from RDF data." ACL Anthology, 2017.
+		"Dart: Open-domain structured data record to text generation." arXiv preprint arXiv:2007.02871 (2020).
+
+	"""
+	def __init__(self,
+				 path_to_data: str,
+				 tokenizer: Any,
+				 max_length: int,
+				 mode: str = 'train',
+				 enc_tokenizer=None,
+				 max_eval_length=0, joint_lm=False, prefix_len=0, infix_len=0,
+				 prefix_cursor=1000000, infix_cursor=2000000
+				 ):
+		self.path_to_data = path_to_data
+		self.tokenizer = tokenizer
+		self.max_enc_length = 256  # set this based on the encoder tokenizer and data stats
+		self.max_length = max_length
+		self.mode = mode
+		self.enc_tokenizer = enc_tokenizer
+		
+		self.max_eval_length = max_eval_length
+		self.joint_lm = joint_lm
+		self.prefix_len = prefix_len
+		self.infix_len = infix_len
+		self.prefix_cursor = prefix_cursor
+		self.infix_cursor = infix_cursor
+		
+		# Read Data
+		self.data, self.aux_info = self.read_data()
+		self.orig_ids: List[str] = list(self.data.keys())
+		
+		# # Get the mapping from the row index to the task_id. Ex: {400: 'sample_400'}
+		# self.idx_to_id = self.get_index_to_id_mapping()
+		#
+		# # Get the mapping from sample position in the dataset to the row index
+		# self.idx_to_pos = self.get_index_to_position_mapping()
+		
+		# Convert examples to features
+		self.inputs, self.labels, self.attn_masks, self.enc_inputs, self.enc_masks, self.task_idxs, self.input_lens = self.convert_examples_to_features()
+		
+	def read_data(self):
+		# Read the data from the jsonl file
+		with open(self.path_to_data, 'r') as f:
+			raw_data = f.readlines()
+		
+		raw_data = [json.loads(d) for d in raw_data]
+
+		data = {}
+		# Some datasets have additional information like seen category indicator in WebNLG and DART
+		aux_info = {}
+		for idx, problem in tqdm(enumerate(raw_data), ncols=0, total=len(raw_data),
+							desc="Reading examples from {} (mode = {}): ".format(self.path_to_data,
+																					  self.mode)):
+			orig_id = str(idx)
+			q_str = problem['context']
+			a_str = problem['completion']
+			data[orig_id] = (q_str, a_str)
+			
+			
+			if 'cate' in problem:
+				aux_info[orig_id] = problem['cate']
+		
+		return data, aux_info
+	
+	def get_sample(self, task_idx):
+		orig_id = self.orig_ids[task_idx]
+		return self.data[orig_id]
+	
+	def category_seen(self, task_idx) -> bool:
+		orig_id = self.orig_ids[task_idx]
+		if not orig_id in self.aux_info:
+			return None
+		return self.aux_info[orig_id]
+	
+	def get_enc_ip(self, q_str):
+		
+		if self.enc_tokenizer is None:
+			raise ValueError("Encoder tokenizer not provided. Even if not required, provide a dummy tokenizer.")
+		
+		src_tokens = self.enc_tokenizer.tokenize(q_str)
+		
+		# For encoder-only models that are designed for language understanding tasks
+		if ((hasattr(self.enc_tokenizer, 'cls_token') and self.enc_tokenizer.cls_token is not None) and
+				(hasattr(self.enc_tokenizer, 'sep_token') and self.enc_tokenizer.sep_token is not None)):
+			max_bert_length = self.max_enc_length - 2  # [CLS] and [SEP]
+			src_tokens = src_tokens[-max_bert_length:]  # Truncate the prompt from left
+			src_tokens = [self.enc_tokenizer.cls_token] + src_tokens + [self.enc_tokenizer.sep_token]
+			src_token_ids = self.enc_tokenizer.convert_tokens_to_ids(src_tokens)
+			
+			# Pad from right (should be fine even when encoder is a causal LM)
+			pad_length = self.max_enc_length - len(src_token_ids)
+			src_token_ids = src_token_ids + [self.enc_tokenizer.pad_token_id] * pad_length
+		
+		# For all other models
+		else:
+			src_tokens = src_tokens[-self.max_enc_length:]
+			src_token_ids = self.enc_tokenizer.convert_tokens_to_ids(src_tokens)
+			
+			# Pad from left
+			pad_length = self.max_enc_length - len(src_token_ids)
+			src_token_ids = [self.enc_tokenizer.pad_token_id] * pad_length + src_token_ids
+		
+		# Convert to tensors
+		src_token_ids = torch.LongTensor(src_token_ids)
+		src_mask = src_token_ids.ne(self.enc_tokenizer.pad_token_id)  # mask out padding
+		
+		return src_token_ids, src_mask
+	
+	def convert_examples_to_features(self):
+		inputs, labels, attn_masks, enc_inputs, enc_masks, task_idxs, input_lens = [], [], [], [], [], [], []
+		
+		pbar = tqdm(total=len(self), ncols=0, desc=f"Converting examples to features (mode={self.mode}): ")
+		for idx in range(len(self)):
+			
+			# ########################### Prepare for the base model ########################### #
+			orig_id = self.orig_ids[idx]
+			q_str, a_str = self.data[orig_id]
+			task_idxs.append(idx)
+			
+			# Tokenize. context and completion is delimited by " "
+			context = self.tokenizer.encode(q_str, verbose=False, add_special_tokens=False) + [self.tokenizer.bos_token_id]
+			completion = self.tokenizer.encode(' ' + a_str, verbose=False, add_special_tokens=False) + [self.tokenizer.eos_token_id]
+			
+			pretokens = [i + self.prefix_cursor for i in range(0, self.prefix_len)]  # Prefix tokens
+			intokens = [i + self.infix_cursor for i in range(0, self.infix_len)]  # Infix tokens
+
+			conditions = pretokens + context + intokens
+			
+			# Prepare input. _input_len includes length of input with bos and eos tokens(if not test)
+			if self.mode == 'train' or self.mode == 'valid':
+				_input, _input_len = self.padding_tokens(conditions + completion, self.max_length, self.tokenizer.pad_token_id, 1)
+				# Prepare label
+				_target = [-100] * len(conditions) + completion
+				_target, _ = self.padding_tokens(_target, self.max_length, -100, 1)
+			else:
+				# During test, max_context_length is max_new_tokens. So we make sure there is some room for generation by truncating from the prompt from left.
+				_input, _input_len = self.padding_tokens(conditions, self.max_length, self.tokenizer.pad_token_id, -1, max_context_length=self.max_length - self.max_eval_length)
+				_target = None
+				
+			# Prepare attention mask
+			attn_mask = [1] * _input_len
+			attn_mask, _ = self.padding_tokens(attn_mask, self.max_length, 0, 1)
+			
+			# Convert to tensors
+			input_ids = torch.LongTensor(_input)
+			label_ids = torch.LongTensor(_target) if _target is not None else None
+			attn_mask = torch.BoolTensor(attn_mask)
+			
+			# ########################### Prepare for the encoder model ########################### #
+			enc_input_ids, enc_mask = self.get_enc_ip(q_str)
+			
+			# Append to the lists
+			inputs.append(input_ids)
+			labels.append(label_ids)
+			attn_masks.append(attn_mask)
+			enc_inputs.append(enc_input_ids)
+			enc_masks.append(enc_mask)
+			input_lens.append(_input_len)
+			
+			pbar.update()
+		
+		logger.info(f"[INFO] Input Length Stats: Min: {min(input_lens)}, Max: {max(input_lens)}, Avg: {sum(input_lens) / len(input_lens)}")
+		
+		return inputs, labels, attn_masks, enc_inputs, enc_masks, task_idxs, input_lens
+
+	@staticmethod
+	def padding_tokens(tokens, max_seq_length, pad_token, direct, max_context_length=0):
+		
+		if max_context_length == 0:
+			max_context_length = max_seq_length
+		
+		if len(tokens) > max_context_length:
+			if direct > 0:
+				# Truncate from right
+				pad_tokens = tokens[:max_context_length]
+			else:
+				# Truncate from left
+				pad_tokens = tokens[-max_context_length:]
+		else:
+			pad_tokens = tokens
+		token_len = len(pad_tokens)
+		# Pad from right
+		pad_tokens += [pad_token for _ in range(max_seq_length - token_len)]
+		return pad_tokens, token_len
+	
+	def __len__(self):
+		return len(self.data)
+	
+	def __getitem__(self, i):
+		if self.mode == 'train' or self.mode == 'valid':
+			return {
+				"task_id": self.task_idxs[i],
+				"input_ids": self.inputs[i],
+				"attention_mask": self.attn_masks[i],
+				"labels": self.labels[i],
+				"enc_input_ids": self.enc_inputs[i],
+				"enc_attention_mask": self.enc_masks[i],
+				"input_len": self.input_lens[i]
+			}
+		else:
+			return {
+				"task_id": self.task_idxs[i],
+				"input_ids": self.inputs[i],
+				"attention_mask": self.attn_masks[i],
+				"enc_input_ids": self.enc_inputs[i],
+				"enc_attention_mask": self.enc_masks[i],
+				"input_len": self.input_lens[i]
+			}
+	
+	def __iter__(self):
+		for i in range(len(self)):
+			if self.mode == 'train' or self.mode == 'valid':
+				yield {
+					"task_id": self.task_idxs[i],
+					"input_ids": self.inputs[i],
+					"attention_mask": self.attn_masks[i],
+					"labels": self.labels[i],
+					"enc_input_ids": self.enc_inputs[i],
+					"enc_attention_mask": self.enc_masks[i],
+					"input_len": self.input_lens[i]
+				}
+			else:
+				yield {
+					"task_id": self.task_idxs[i],
 					"input_ids": self.inputs[i],
 					"attention_mask": self.attn_masks[i],
 					"enc_input_ids": self.enc_inputs[i],

@@ -50,12 +50,13 @@ class Trainer(BaseTrainer):
 		
 		# Get the config
 		lora_config = LoraConfig(
-			r=16,
-			lora_alpha=32,
+			r=self.args.lora_dim,
+			lora_alpha=self.args.lora_alpha,
 			target_modules=LORA_IA3_TARGET_MODULES[args.model_type]["target_modules_lora"],
-			lora_dropout=0.1,
+			lora_dropout=self.args.lora_dropout,
 			bias="none",
 			# modules_to_save=["classifier"],  # List of modules apart from adapter layers to be set as trainable and saved in the final checkpoint.
+			fan_in_fan_out=True if 'gpt2' in args.model_type else False,  # True if the model has fan_in_fan_out
 		)
 		
 		if args.load_adapter_from is not None:
@@ -84,7 +85,7 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}_lora"}}
+				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}/lora"}}
 			)
 	
 	def count_parameters(self):
@@ -124,6 +125,17 @@ class Trainer(BaseTrainer):
 			f"total_loss": total_loss.detach().cpu().numpy().item(),
 			f"reconstruction_loss": reconstruction_loss.detach().cpu().numpy().item(),
 		}
+	
+	def _eval_step(self, batch):
+		with self.accelerator.accumulate(self.model):
+			output = self.model(
+				input_ids=batch["input_ids"],
+				attention_mask=batch["attention_mask"],
+				labels=batch["labels"],
+				output_hidden_states=True
+			)
+			reconstruction_loss = output.loss
+		return reconstruction_loss
 	
 	def save(self, dir_tag: str):
 		

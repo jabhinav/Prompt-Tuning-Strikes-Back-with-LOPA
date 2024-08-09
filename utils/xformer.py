@@ -4,7 +4,7 @@ import numpy as np
 from transformers import RobertaConfig, T5Config, BartConfig, GPT2Config, OpenAIGPTConfig, BertConfig, \
 	DistilBertConfig, GPTNeoConfig, AutoConfig
 from transformers import RobertaModel, T5ForConditionalGeneration, BartForConditionalGeneration, GPT2LMHeadModel, \
-	OpenAIGPTLMHeadModel, BertForMaskedLM, DistilBertForMaskedLM, GPTNeoForCausalLM, AutoModel, AutoModelForCausalLM
+	OpenAIGPTLMHeadModel, BertForMaskedLM, DistilBertForMaskedLM, GPTNeoForCausalLM, AutoModel, AutoModelForCausalLM, GPT2LMHeadModel
 from transformers import RobertaTokenizer, T5Tokenizer, BartTokenizer, GPT2Tokenizer, OpenAIGPTTokenizer, \
 	BertTokenizer, DistilBertTokenizer, AutoTokenizer, CodeGenTokenizer, CodeGenTokenizerFast
 from utils.custom import is_rank_0
@@ -12,18 +12,21 @@ from utils.custom import is_rank_0
 logger = logging.getLogger(__name__)
 
 MODEL_CLASSES = {
-	'roberta': (RobertaConfig, RobertaModel),
+	'robetra-base': (RobertaConfig, RobertaModel),
+	'roberta-large': (RobertaConfig, RobertaModel),
 	't5': (T5Config, T5ForConditionalGeneration),
 	'bart': (BartConfig, BartForConditionalGeneration),
+	'bert': (BertConfig, BertForMaskedLM),
+	'distilbert': (DistilBertConfig, DistilBertForMaskedLM),
+	'codebert-base': (AutoConfig, AutoModel),
+	# ############################# OpenAI GPT Models ############################## #
 	'gpt2': (GPT2Config, GPT2LMHeadModel),
+	'gpt2-medium': (GPT2Config, GPT2LMHeadModel),
 	'gpt2-large': (GPT2Config, GPT2LMHeadModel),
 	'gpt2-xl': (GPT2Config, GPT2LMHeadModel),
 	'gpt-neo-125M': (GPTNeoConfig, GPTNeoForCausalLM),
 	'gpt-neo-1.3B': (GPTNeoConfig, GPTNeoForCausalLM),
 	'openai-gpt': (OpenAIGPTConfig, OpenAIGPTLMHeadModel),
-	'bert': (BertConfig, BertForMaskedLM),
-	'distilbert': (DistilBertConfig, DistilBertForMaskedLM),
-	'codebert-base': (AutoConfig, AutoModel),
 	# ############################# Codesage encoder-only Models ############################## #
 	'codesage-base': (AutoConfig, AutoModel),
 	'codesage-small': (AutoConfig, AutoModel),
@@ -68,7 +71,8 @@ MODEL_CLASSES = {
 }
 
 TOKENIZER_CLASSES = {
-	'roberta': RobertaTokenizer,
+	'roberta-base': RobertaTokenizer,
+	'roberta-large': RobertaTokenizer,
 	't5': T5Tokenizer,
 	'codet5-small': RobertaTokenizer,
 	'codet5-base': RobertaTokenizer,
@@ -78,6 +82,8 @@ TOKENIZER_CLASSES = {
 	'codet5-large-ntp-py': RobertaTokenizer,  # Official Documentation uses AutoTokenizer
 	'bart': BartTokenizer,
 	'gpt2': GPT2Tokenizer,
+	'gpt2-medium': GPT2Tokenizer,
+	'gpt2-large': GPT2Tokenizer,
 	'gpt2-xl': GPT2Tokenizer,
 	'gpt-neo-125M': GPT2Tokenizer,
 	'gpt-neo-1.3B': GPT2Tokenizer,
@@ -93,6 +99,19 @@ LORA_IA3_TARGET_MODULES = {
 	},
 	"phi-3": {
 		"target_modules_lora": ["qkv_proj"],
+	},
+	# ################################ OpenAI GPT Models ################################# #
+	"gpt2": {
+		"target_modules_lora": ["c_attn"],
+	},
+	"gpt2-medium": {
+		"target_modules_lora": ["c_attn"],  # LoRA official targets only c_attn
+	},
+	"gpt2-large": {
+		"target_modules_lora": ["c_attn"],
+	},
+	"gpt2-xl": {
+		"target_modules_lora": ["c_attn"],
 	},
 	# ############################# Salesforce CodeT5 Models ############################# #
     "codet5p-220m": {
@@ -192,7 +211,7 @@ def load_tokenizer(model_type, tokenizer_name):
 	
 	tokenizer = tokenizer_class.from_pretrained(
 		tokenizer_name,
-		trust_remote_code=True
+		trust_remote_code=True,
 	)
 	
 	if not tokenizer.eos_token:
@@ -225,7 +244,7 @@ def load_base_model(model_type, config_name, model_path, load_in_8bit: bool = Fa
 		model_path,
 		trust_remote_code=True,
 		revision="main",
-		device_map="auto",
+		# device_map="auto",
 		# # For loading model in bfloat16, set. This is not quantization so it will not be as slow.
 		# torch_dtype=torch.bfloat16,
 		# # For loading model in 8bit, set. This is quantization so it will be slower.
@@ -238,13 +257,21 @@ def load_base_model(model_type, config_name, model_path, load_in_8bit: bool = Fa
 
 
 def get_huggingface_path(model: str) -> str:
+	# ############################# FacebookAI BERT Models ############################# #
+	if model == 'roberta-large':
+		huggingface_path = 'roberta-large'  # roberta-large (355M)
+	elif model == 'roberta-base':
+		huggingface_path = 'roberta-base'  # roberta-base (125M)
 	# ############################# OpenAI GPT Models ############################# #
-	if model == 'gpt2':  # gpt2 (124M)
+	elif model == 'gpt2':  # gpt2 (124M)
 		huggingface_path = 'gpt2'
-	elif model == 'gpt2-large':  # gpt2-medium(335M), gpt2-large (774M)
+	elif model == 'gpt2-medium':  # gpt2-medium(335M)
+		huggingface_path = 'gpt2-medium'
+	elif model == 'gpt2-large':  # gpt2-large (774M)
 		huggingface_path = 'gpt2-large'
 	elif model == 'gpt2-xl':
 		huggingface_path = 'gpt2-xl'  # gpt2-xl (1.5B)
+	# ############################# EleutherAI GPT Models ############################# #
 	elif model == 'gpt-neo-125M':
 		huggingface_path = 'EleutherAI/gpt-neo-125M'
 	elif model == 'gpt-neo-1.3B':

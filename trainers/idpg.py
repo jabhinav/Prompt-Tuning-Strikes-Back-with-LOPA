@@ -39,6 +39,7 @@ class Trainer(BaseTrainer):
 			if is_rank_0():
 				print(msg)
 		
+		self.logger.info("Initialized the encoder.")
 		return model
 	
 	def init_decoder(self):
@@ -96,7 +97,7 @@ class Trainer(BaseTrainer):
 		# This should match dimensions of torch.nn.Embedding(total_virtual_tokens, config.token_dim)
 		self.args.total_virtual_tokens = self.args.num_virtual_tokens * peft_config.num_transformer_submodules
 		self.args.word_embedding_dim = peft_config.token_dim
-		
+		self.logger.info("Initialized the decoder.")
 		return model
 	
 	def _build_model(self):
@@ -113,7 +114,7 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}_idpg"}}
+				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}/idpg"}}
 			)
 	
 	def count_parameters(self):
@@ -149,6 +150,12 @@ class Trainer(BaseTrainer):
 			f"reconstruction_loss": reconstruction_loss.detach().cpu().numpy().item(),
 			# f"kl_div": kl_div.detach().cpu().numpy().item(),
 		}
+	
+	def _eval_step(self, batch):
+		with self.accelerator.accumulate(self.model):
+			output = self.model(batch)
+			reconstruction_loss = output.loss
+		return reconstruction_loss
 	
 	def save(self, dir_tag: str):
 		

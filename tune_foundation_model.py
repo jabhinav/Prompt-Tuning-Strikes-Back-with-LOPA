@@ -1,7 +1,9 @@
 from accelerate.logging import MultiProcessAdapter
-
+import os
 from utils.config import get_config
 from utils.custom import is_rank_0
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def main():

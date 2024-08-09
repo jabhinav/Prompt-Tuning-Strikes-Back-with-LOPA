@@ -993,7 +993,10 @@ class PeftIDPGModelForCausalLM(PeftIDPGModel):
 			else:
 				if model_kwargs["past_key_values"] is None:
 					inputs_embeds = self.word_embeddings(model_kwargs["input_ids"])
-					model_kwargs["inputs_embeds"] = torch.cat((self.soft_prompt, inputs_embeds), dim=1)
+					# For cases like beam-decoding, soft prompt encoded for a sample must be repeated for all beams
+					batch_size = model_kwargs["input_ids"].shape[0]
+					soft_prompt = self.soft_prompt.repeat(batch_size, 1, 1)
+					model_kwargs["inputs_embeds"] = torch.cat((soft_prompt, inputs_embeds), dim=1)
 					model_kwargs["input_ids"] = None
 		
 		# For transformers>=4.38.0 - for some architectures such as Llama, `cache_position` is

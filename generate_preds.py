@@ -12,7 +12,7 @@ from accelerate.logging import MultiProcessAdapter
 from utils.config import get_config
 from utils.eval import decode_predictions, save_predictions_mbxp_format
 from torch.utils.data.dataloader import DataLoader
-from utils.data import CruxEval_Dataset_wEnc, MBPP_Dataset_wEnc
+from utils.data import CruxEval_Dataset_wEnc, MBPP_Dataset_wEnc, NLG_Dataset_wEnc
 from utils.xformer import load_tokenizer, load_base_model, get_huggingface_path
 
 from transformers import StoppingCriteria
@@ -311,6 +311,28 @@ def generate(args, logger):
 					if (input_ids[0][-len(stop_token_id[0]):] == stop_token_id[0]).all():
 						return True
 				return False
+			
+	elif args.task_name in ['nlg_e2e', 'nlg_webnlg', 'nlg_dart']:
+		dataset = NLG_Dataset_wEnc(
+			path_to_data=args.path_to_test_data,
+			tokenizer=fm_tokenizer,
+			max_length=args.max_length,
+			mode='test',
+			enc_tokenizer=enc_tokenizer,
+			max_eval_length=args.max_new_tokens,
+		)
+		
+		# Prepare the generation kwargs
+		kwargs = {
+			"max_new_tokens": args.max_new_tokens,
+			"do_sample": args.do_sample,
+			"num_return_sequences": args.num_return_sequences,
+			"num_beams": args.num_beams,
+			"length_penalty": args.length_penalty,
+			"no_repeat_ngram_size": args.no_repeat_ngram_size,
+			"repetition_penalty": args.repetition_penalty,
+			"temperature": args.temperature,
+		}
 		
 	else:
 		raise ValueError(f"Please specify the correct task name. {args.task_name} is not supported.")
@@ -373,6 +395,10 @@ def generate(args, logger):
 			kwargs["max_new_tokens"] = args.max_length - num_tokens
 			kwargs["stopping_criteria"] = [StopOnTokens()]  # create a new instance for each batch
 		
+		elif args.task_name in ['nlg_e2e', 'nlg_webnlg', 'nlg_dart']:
+			inputs = batch["input_ids"][:, :batch["input_len"]]  # this removes the padding tokens on the right
+			attention_mask = batch["attention_mask"][:, :batch["input_len"]]
+
 		else:
 			inputs = batch["input_ids"]
 			attention_mask = batch["attention_mask"]
@@ -419,7 +445,7 @@ def generate(args, logger):
 			gen_token_dict[task_idx].append(generated_tokens)
 	
 	# ################################ Decode the predictions ############################################### #
-	code_gens, code_gens_raw = decode_predictions(args, gen_token_dict, fm_tokenizer, dataset)
+	decoded_preds_processed, decoded_preds_raw = decode_predictions(args, gen_token_dict, fm_tokenizer, dataset)
 	
 	# ################################ Save the predictions ################################################## #
 	if 'cruxeval' in args.task_name:
@@ -430,11 +456,11 @@ def generate(args, logger):
 		
 		if accelerator.is_main_process:
 			with open(os.path.join(args.log_dir, 'output.json'), 'w') as f:
-				json.dump(code_gens, f, indent=4)
+				json.dump(decoded_preds_processed, f, indent=4)
 			logger.info(f"Saved the output in {args.log_dir}")
 			
 			with open(os.path.join(args.log_dir, 'output_raw.json'), 'w') as f:
-				json.dump(code_gens_raw, f, indent=4)
+				json.dump(decoded_preds_raw, f, indent=4)
 			logger.info(f"Saved the raw output in {args.log_dir}")
 			
 			with open(os.path.join(args.log_dir, 'references.json'), 'w') as f:
@@ -445,14 +471,82 @@ def generate(args, logger):
 		
 		if accelerator.is_main_process:
 			# Map back the task ids to the original ids
-			oracle_output = {dataset.ids[k]: v for k, v in enumerate(code_gens)}
+			oracle_output = {dataset.ids[k]: v for k, v in enumerate(decoded_preds_processed)}
 			
 			# Save the output
 			with open(args.save_results_at, 'w') as f:
 				json.dump(oracle_output, f, indent=4)
 			
 			save_predictions_mbxp_format(args, oracle_output, lang='python', d_type='MBPP')
+	
+	elif args.task_name == 'nlg_e2e':
+		if accelerator.is_main_process:
+			with open(os.path.join(args.log_dir, 'e2e_ref.txt'), 'w', encoding='utf8') as ref_writer:
+				with open(os.path.join(args.log_dir, 'e2e_pred.txt'), 'w', encoding='utf8') as pred_writer:
+					with open(os.path.join(args.log_dir, 'e2e_raw.txt'), 'w', encoding='utf8') as raw_writer:
+						with open(os.path.join(args.log_dir, 'e2e_context.txt'), 'w', encoding='utf8') as prompt_writer:
+							for context in decoded_preds_processed:
+								gen_text = decoded_preds_processed[context]['generated_text']
+								references = decoded_preds_processed[context]['references']
+								hypothesis = decoded_preds_processed[context]['hypothesis']
+								for ref in references:
+									ref_writer.write(ref + '\n')
+								ref_writer.write('\n')
+								pred_writer.write(hypothesis + '\n')
+								raw_writer.write(gen_text + '\n')
+								prompt_writer.write(context + '\n')
+	
+	elif args.task_name in ['nlg_webnlg', 'nlg_dart']:
+		if accelerator.is_main_process:
+			categories = ['seen', 'unseen', 'all']
 			
+			for cate in categories:
+				result_dir = os.path.join(args.log_dir, cate)
+				if not os.path.exists(result_dir):
+					os.makedirs(result_dir)
+			
+				output_ref_file = os.path.join(result_dir, 'references_{}'.format(args.task_name.split('_')[1]))
+				output_pred_file = os.path.join(result_dir, 'hypothesis_{}'.format(args.task_name.split('_')[1]))
+				
+				with open(output_pred_file, 'w', encoding='utf8') as pred_writer:
+					with open(os.path.join(result_dir, 'raw.txt'), 'w', encoding='utf8') as raw_writer:
+						with open(os.path.join(result_dir, 'context.txt'), 'w', encoding='utf8') as prompt_writer:
+							if not os.path.exists(output_ref_file):
+								os.makedirs(output_ref_file)
+							
+							ref_num = 6  # Both for webnlg and dart
+							reference_writers = [
+								open(os.path.join(output_ref_file, f'reference{fid}'), 'w', encoding='utf8')
+								for fid in range(0, ref_num)
+							]
+							for context in decoded_preds_processed:
+								
+								if cate == 'seen' and not decoded_preds_processed[context]['cate']:
+									# Skip samples which are not seen
+									continue
+								if cate == 'unseen' and decoded_preds_processed[context]['cate']:
+									# Skip samples which are seen
+									continue
+								
+								gen_text = decoded_preds_processed[context]['generated_text']
+								references = decoded_preds_processed[context]['references']
+								hypothesis = decoded_preds_processed[context]['hypothesis']
+								
+								# This loop will always write 6 references (will repeat in case of less references)
+								for fid in range(0, ref_num):
+									if len(references) > fid:
+										reference_writers[fid].write(references[fid] + '\n')
+									else:
+										reference_writers[fid].write(references[0] + '\n')
+								
+								pred_writer.write(hypothesis + '\n')
+								raw_writer.write(gen_text + '\n')
+								prompt_writer.write(context + '\n')
+							
+							# Close the reference writers
+							for writer in reference_writers:
+								writer.close()
+
 	else:
 		raise ValueError(f"Please specify the correct task name. {args.task_name} is not supported.")
 
@@ -464,7 +558,8 @@ def main():
 	# # Debug
 	# args.do_peft = 1
 	# args.load_base_from_path = './logging/Baseline_0.50/output/pytorch_model.bin'
-	# args.load_adapter_from = './logging/PEFT_Oracle_0.50_0.50_20ep/PromptTuningMultiModel'
+	# args.load_adapter_from = './logging/e2e_pt_m100/final/PEFT'
+	# args.clf_predictor_path = './logging/e2e_pt_m100/final/clf_predictor.pt'
 	
 	generate(args, logger)
 

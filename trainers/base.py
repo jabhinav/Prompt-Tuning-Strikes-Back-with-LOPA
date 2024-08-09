@@ -7,12 +7,13 @@ import torch
 from accelerate import DistributedDataParallelKwargs
 from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tqdm import tqdm
 from transformers import get_scheduler
 
 from utils.data import CruxEval_Dataset_wEnc
 from utils.data import MBPP_Dataset_wEnc
+from utils.data import NLG_Dataset_wEnc
 from utils.xformer import load_tokenizer, get_huggingface_path
 
 
@@ -54,6 +55,7 @@ class BaseTrainer(object):
 			self.logger.info("Building dataset...")
 			start = time.monotonic_ns()
 			self.train_dataset, self.train_dataloader = self._build_dataloader()
+			self.eval_dataset, self.eval_dataloader = self._build_eval_dataloader()
 			end = time.monotonic_ns()
 			self.logger.info(f"Building dataset done in {(end - start) / 1e6:.2f}ms")
 		
@@ -156,6 +158,15 @@ class BaseTrainer(object):
 					prefix=self.args.prefix,
 					cot=self.args.cot,
 				)
+			elif self.args.task_name in ['nlg_e2e', 'nlg_webnlg', 'nlg_dart']:
+				dataset = NLG_Dataset_wEnc(
+					path_to_data=self.args.path_to_data,
+					tokenizer=self.tokenizer,
+					max_length=self.args.max_length,
+					mode='train',
+					enc_tokenizer=self.enc_tokenizer,
+				)
+				
 			else:
 				raise ValueError(f"Invalid task name: {self.args.task_name}")
 		
@@ -173,6 +184,30 @@ class BaseTrainer(object):
 		self.args.max_train_steps = self.args.num_epochs * num_update_steps_per_epoch
 		
 		return dataset, train_dataloader
+	
+	
+	def _build_eval_dataloader(self):
+		eval_dataset, eval_dataloader = None, None
+
+		if self.args.task_name in ['nlg_e2e', 'nlg_webnlg', 'nlg_dart']:
+			eval_dataset = NLG_Dataset_wEnc(
+				path_to_data=self.args.path_to_eval_data,
+				tokenizer=self.tokenizer,
+				max_length=self.args.max_length,
+				mode='valid',
+				enc_tokenizer=self.enc_tokenizer,
+			)
+			
+			sampler = SequentialSampler(eval_dataset)
+			eval_dataloader = DataLoader(
+				eval_dataset,
+				sampler=sampler,
+				batch_size=self.args.per_gpu_eval_batch_size,
+				num_workers=0,
+				pin_memory=False
+			)
+			
+		return eval_dataset, eval_dataloader
 	
 	def _build_model(self):
 		raise NotImplementedError
@@ -219,8 +254,12 @@ class BaseTrainer(object):
 	
 	def _accelerator_prepare(self):
 		
-		self.train_dataloader, self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
-			self.train_dataloader, self.model, self.optimizer, self.scheduler)
+		if self.eval_dataloader is not None:
+			self.train_dataloader, self.eval_dataloader, self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
+				self.train_dataloader, self.eval_dataloader, self.model, self.optimizer, self.scheduler)
+		else:
+			self.train_dataloader, self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
+				self.train_dataloader, self.model, self.optimizer, self.scheduler)
 	
 	def recalculate_training_metrics(self):
 		
@@ -252,10 +291,17 @@ class BaseTrainer(object):
 		raise NotImplementedError
 	
 	def _train_step(self, batch):
-		r"""Forward step for training and inference. This function is called
+		r"""Forward step for training. This function is called
 		in ``_train_step`` & ``_test_step`` function.
 		"""
 		raise NotImplementedError
+	
+	def _eval_step(self, batch):
+		r"""Forward step for evaluation. This function is called
+		in ``_eval_epoch`` function.
+		"""
+		raise NotImplementedError
+	
 	
 	def _train_epoch(self):
 		r"""Training epoch. Should return average loss of a batch (sample) over
@@ -305,12 +351,45 @@ class BaseTrainer(object):
 		
 		return epoch_losses
 	
+	
+	def _eval_epoch(self):
+		self.model.eval()
+		
+		# Initialize the losses
+		total_loss = 0.0
+		
+		with torch.no_grad():
+			for batch in tqdm(
+					self.eval_dataloader,
+					desc=f"Evaluating Epoch {self.epoch}",
+					unit="batch",
+					colour="YELLOW",
+					leave=False,
+					dynamic_ncols=True,
+					smoothing=0.04,
+					disable=not self.accelerator.is_main_process,
+			):
+				
+				# Loss function = -log(p(x|z))
+				reconstruction_loss = self._eval_step(batch)
+				
+				# Total loss
+				total_loss += reconstruction_loss.item()
+				
+		avg_loss = total_loss / len(self.eval_dataloader)
+		ppl = math.exp(avg_loss)  # ppl stands for perplexity
+		
+		return {"total_loss": avg_loss, "ppl": ppl}
+	
 	def train_loop(self):
 		r"""Training loop. The public entry of training process."""
 		
 		# # For Debugging
 		# if self.accelerator.is_main_process:
 		# 	self.save("init")
+		
+		# Initialize the trackers
+		best_val_ppl = None
 		
 		self.accelerator.wait_for_everyone()
 		while self.epoch < self.args.num_epochs:
@@ -330,6 +409,25 @@ class BaseTrainer(object):
 							{"Epoch/{}".format(key): loss},
 							step=self.step,
 						)
+			
+			# Do evaluation epoch
+			if self.eval_dataloader is not None:
+				eval_metrics = self._eval_epoch()
+				
+				self.logger.info("  |- Eval/Total Loss: {:.6f}".format(eval_metrics["total_loss"]))
+				self.logger.info("  |- Eval/Perplexity: {:.6f}".format(eval_metrics["ppl"]))
+				
+				if self.args.wandb_logging:
+					self.accelerator.log(
+						{"Epoch/Eval/Total Loss": eval_metrics["total_loss"], "Epoch/Eval/Perplexity": eval_metrics["ppl"]},
+						step=self.step,
+					)
+			
+				# Tracking the best metrics
+				if best_val_ppl is None or eval_metrics["ppl"] < best_val_ppl:
+					best_val_ppl = eval_metrics["ppl"]
+					self.logger.info("  |- Best model found! Saving...")
+					self.save(f"best_epoch")
 			
 			# Update info for each epoch
 			self.epoch += 1

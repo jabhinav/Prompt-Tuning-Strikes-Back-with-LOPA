@@ -81,7 +81,7 @@ class Trainer(BaseTrainer):
 			self.accelerator.init_trackers(
 				project_name=self.args.project_name,
 				config=vars(self.args),
-				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}_pt"}}
+				init_kwargs={"wandb": {"name": f"{self.args.task_name}/{self.args.model_type}/pt"}}
 			)
 	
 	def count_parameters(self):
@@ -121,6 +121,17 @@ class Trainer(BaseTrainer):
 			f"total_loss": total_loss.detach().cpu().numpy().item(),
 			f"reconstruction_loss": reconstruction_loss.detach().cpu().numpy().item(),
 		}
+	
+	def _eval_step(self, batch):
+		with self.accelerator.accumulate(self.model):
+			output = self.model(
+				input_ids=batch["input_ids"],
+				attention_mask=batch["attention_mask"],
+				labels=batch["labels"],
+				output_hidden_states=True
+			)
+			reconstruction_loss = output.loss
+		return reconstruction_loss
 	
 	def save(self, dir_tag: str):
 		
