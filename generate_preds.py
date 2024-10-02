@@ -156,7 +156,7 @@ def load_idpg(args, logger, accelerator, model):
 
 
 def load_lopa(args, logger, accelerator, model):
-	from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftCvaeModel
+	from custom_peft import PromptTuningConfig, TaskType, PromptTuningInit, PeftLopaModel
 	if not os.path.exists(args.load_adapter_from):
 		logger.error("Please specify the correct path to load the model adapters from")
 		raise ValueError("Please specify the correct path to load the model adapters from")
@@ -169,7 +169,7 @@ def load_lopa(args, logger, accelerator, model):
 	)
 	
 	# # Load the model adapters - in place
-	model = PeftCvaeModel.from_pretrained(
+	model = PeftLopaModel.from_pretrained(
 		model=model,
 		model_id=args.load_adapter_from,  # Must be a directory containing the model files
 		config=peft_config,
