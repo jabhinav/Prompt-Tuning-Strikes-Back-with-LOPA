@@ -1,6 +1,6 @@
 # Prompt Tuning Strikes Back: Customizing Foundation Models with Low-Rank Prompt Adaptation
 
-This repository contains the official implementation of the paper titled "Prompt Tuning Strikes Back: Customizing Foundation  Models with Low-Rank Prompt Adaptation"
+This repository contains the official implementation of the paper titled "Prompt Tuning Strikes Back: Customizing Foundation  Models with Low-Rank Prompt Adaptation" accepted at NIPS 24.
 
 <div style="display: flex; gap: 1px;">
   <figure style="flex: 0 0 30%;">
