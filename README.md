@@ -67,6 +67,8 @@ docker pull aj0509/prog_synth:latest
 - `--log_dir`: Directory to save logs. By default, the current timestamp is used as the name of the directory.
   - Example: `./logs`
 
+- `--wandb_logging`: Flag to enable logging to Weights and Biases.
+
 ### Sample Command
 
 Here is a sample command that tunes `phi-2` for MBPP using LOPA with 10 virtual tokens and rank 1:
@@ -184,3 +186,14 @@ We welcome contributions to the project. Please raise an issue or submit a pull 
 
 To run larger models, we recommend using the following resources:
 [Huggingface GPU Inference](https://huggingface.co/blog/hf-bitsandbytes-integration)
+
+## Citation
+
+```bibtex
+@article{jain2024prompt,
+  title={Prompt Tuning Strikes Back: Customizing Foundation Models with Low-Rank Prompt Adaptation},
+  author={Jain, Abhinav and Chaudhuri, Swarat and Reps, Thomas and Jermaine, Chris},
+  journal={arXiv preprint arXiv:2405.15282},
+  year={2024}
+}
+```
