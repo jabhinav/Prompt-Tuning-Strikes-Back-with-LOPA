@@ -30,7 +30,7 @@ from .peft_model import (
     PeftModelForTokenClassification,
 )
 
-from .my_peft_cvae_model import PeftCvaeModel, PeftCvaeModelForCausalLM
+from .peft_lopa_model import PeftLopaModel, PeftLopaModelForCausalLM
 from .peft_idpg_baseline_model import PeftIDPGModel, PeftIDPGModelForCausalLM
 
 from .tuners import (
@@ -56,7 +56,7 @@ MODEL_TYPE_TO_PEFT_MODEL_MAPPING = {
     "SEQ_CLS": PeftModelForSequenceClassification,
     "SEQ_2_SEQ_LM": PeftModelForSeq2SeqLM,
     "CAUSAL_LM": PeftModelForCausalLM,
-    "CVAE_CAUSAL_LM": PeftCvaeModelForCausalLM,
+    "CVAE_CAUSAL_LM": PeftLopaModelForCausalLM,
     "IDPG_CAUSAL_LM": PeftIDPGModelForCausalLM,
     "TOKEN_CLS": PeftModelForTokenClassification,
     "QUESTION_ANS": PeftModelForQuestionAnswering,

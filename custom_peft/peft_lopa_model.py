@@ -74,7 +74,7 @@ PEFT_TYPE_TO_MODEL_MAPPING = {
 }
 
 
-class PeftCvaeModel(PushToHubMixin, torch.nn.Module):
+class PeftLopaModel(PushToHubMixin, torch.nn.Module):
 	"""
 	Base model encompassing various Peft methods.
 
@@ -817,7 +817,7 @@ class PeftCvaeModel(PushToHubMixin, torch.nn.Module):
 		card.save(filename)
 
 
-class PeftCvaeModelForCausalLM(PeftCvaeModel):
+class PeftLopaModelForCausalLM(PeftLopaModel):
 	"""
 	Peft model for causal language modeling.
 

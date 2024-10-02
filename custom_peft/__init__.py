@@ -45,7 +45,7 @@ from .peft_model import (
     PeftModelForFeatureExtraction,
 )
 # ################################################ My custom  ######################################### #
-from .my_peft_cvae_model import PeftCvaeModel, PeftCvaeModelForCausalLM
+from .peft_lopa_model import PeftLopaModel, PeftLopaModelForCausalLM
 from .peft_idpg_baseline_model import PeftIDPGModel, PeftIDPGModelForCausalLM
 
 from .tuners import (

@@ -2,7 +2,7 @@ import os
 
 import torch
 
-from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftCvaeModel
+from custom_peft import get_peft_model, PromptTuningInit, PromptTuningConfig, TaskType, PeftLopaModel
 from trainers.base import BaseTrainer
 from utils.custom import is_rank_0
 from utils.model import LatentPromptAttentionGenerator as EmbeddingEncoder, LOPA
@@ -75,14 +75,14 @@ class Trainer(BaseTrainer):
 		
 		# Get the config
 		peft_config = PromptTuningConfig(
-			task_type=TaskType.CVAE_CAUSAL_LM,
+			task_type=TaskType.LOPA_MASKED_LM,
 			prompt_tuning_init=PromptTuningInit.RANDOM,  # TEXT for text, RANDOM for random
 			num_virtual_tokens=args.num_virtual_tokens,
 		)
 		
 		if args.load_adapter_from is not None:
 			# Load the model adapters - in place
-			model = PeftCvaeModel.from_pretrained(
+			model = PeftLopaModel.from_pretrained(
 				model=model,
 				model_id=args.load_adapter_from,  # Must be a directory containing the model files
 				config=peft_config,

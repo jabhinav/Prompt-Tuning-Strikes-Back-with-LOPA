@@ -63,7 +63,7 @@ def get_config():
 	parser.add_argument("--per_gpu_train_batch_size", type=int, default=2)
 	parser.add_argument("--per_gpu_eval_batch_size", type=int, default=4)
 	parser.add_argument("--lr", type=float, default=1e-3,
-						help="1e-3 for PT/IDPG/Ours, 1e-4 for LoRA(r=16), 2e-4 for LoRA(r=4) + GPT2, 1e-5 for FFT")
+						help="1e-3 for PT/IDPG/LOPA, 1e-4 for LoRA(r=16), 2e-4 for LoRA(r=4) + GPT2, 1e-5 for FFT")
 	parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
 	parser.add_argument("--num_warmup_steps", type=int, default=500)
 	parser.add_argument("--weight_decay", type=float, default=0.05)  # Used only by FFT
