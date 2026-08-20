@@ -6,3 +6,7 @@
 /mxeval/data/
 /data/mxeval/
 /archive/
+/logging/
+/data/
+**/__pycache__/
+**/.DS_Store
